@@ -2,6 +2,7 @@ package cli
 
 import (
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -97,56 +98,53 @@ func TestCreateNewFileIsExclusive(t *testing.T) {
 	}
 }
 
-func TestNewApiClientForVerification(t *testing.T) {
-	saved := RequireServerVerification
-	t.Cleanup(func() { RequireServerVerification = saved })
-	RequireServerVerification = true
-	asNcli(t)
+// testClientPair writes a client pair for the test and returns the client:
+// block that names it: an https entry presents it.
+func testClientPair(t *testing.T) CliClientConf {
+	t.Helper()
+	dir := t.TempDir()
+	cc := CliClientConf{Cert: filepath.Join(dir, "c.crt"), Key: filepath.Join(dir, "c.key")}
+	if _, _, err := ensureClientCert(cc.Cert, cc.Key, "test"); err != nil {
+		t.Fatal(err)
+	}
+	return cc
+}
 
+// An https entry verifies the daemon by its pins and presents the client
+// certificate; anything less is refused with the command that fixes it.
+// Plain http is refused: the management API is TLS only. The socket needs
+// nothing.
+func TestNewApiClientForVerification(t *testing.T) {
+	asNcli(t)
+	cc := testClientPair(t)
 	for _, tc := range []struct {
-		name     string
-		e        ApiDetails
-		wantErr  string
-		wantWarn bool
+		name    string
+		e       ApiDetails
+		cc      CliClientConf
+		wantErr string
 	}{
-		{name: "https verifying nothing", e: ApiDetails{Name: "a", BaseURL: "https://127.0.0.1:1/api/v1"}, wantErr: "no pin of the daemon's certificate"},
-		{name: "the refusal says how to pin", e: ApiDetails{Name: "a", BaseURL: "https://127.0.0.1:1/api/v1", ConfigFile: "/etc/tdns/tdns-imr.yaml"}, wantErr: "fix: tdns-ncli config update a --repin"},
-		{name: "insecure said out loud", e: ApiDetails{Name: "a", BaseURL: "https://127.0.0.1:1/api/v1", RootCA: "insecure"}, wantWarn: true},
-		{name: "pinned", e: ApiDetails{Name: "a", BaseURL: "https://127.0.0.1:1/api/v1", TLSAuth: "pin", Pins: []string{pinOf("d")}}},
-		{name: "pin without pins", e: ApiDetails{Name: "a", BaseURL: "https://127.0.0.1:1/api/v1", TLSAuth: "pin"}, wantErr: "no pins"},
-		{name: "pkix, system roots", e: ApiDetails{Name: "a", BaseURL: "https://127.0.0.1:1/api/v1", TLSAuth: "pkix"}},
-		{name: "unknown tlsauth", e: ApiDetails{Name: "a", BaseURL: "https://127.0.0.1:1/api/v1", TLSAuth: "dane"}, wantErr: "unknown tlsauth"},
-		{name: "plain http on loopback", e: ApiDetails{Name: "a", BaseURL: "http://127.0.0.1:1/api/v1"}},
-		{name: "plain http on localhost", e: ApiDetails{Name: "a", BaseURL: "http://localhost:1/api/v1"}},
-		{name: "plain http on ::1", e: ApiDetails{Name: "a", BaseURL: "http://[::1]:1/api/v1"}},
-		{name: "plain http elsewhere warns", e: ApiDetails{Name: "a", BaseURL: "http://192.0.2.1:1/api/v1"}, wantWarn: true},
-		{name: "the socket needs nothing", e: ApiDetails{Name: "a", BaseURL: "unix:///var/run/tdns/x.sock", AuthMethod: "none"}},
-		{name: "certificate without one", e: ApiDetails{Name: "a", BaseURL: "https://127.0.0.1:1/api/v1", TLSAuth: "pin", Pins: []string{pinOf("d")}, AuthMethod: "certificate"}, wantErr: "client init"},
+		{name: "https with no pins", e: ApiDetails{Name: "a", BaseURL: "https://127.0.0.1:1/api/v1"}, cc: cc, wantErr: "no pin of the daemon's certificate"},
+		{name: "the refusal says how to pin", e: ApiDetails{Name: "a", BaseURL: "https://127.0.0.1:1/api/v1", ConfigFile: "/etc/tdns/tdns-imr.yaml"}, cc: cc, wantErr: "fix: tdns-ncli config update a --cert"},
+		{name: "no config-file: the likely daemon config", e: ApiDetails{Name: "auth2", Role: "auth", BaseURL: "https://127.0.0.1:1/api/v1"}, cc: cc, wantErr: "fix: tdns-ncli config update auth2 --cert --daemon-config /etc/tdns/tdns-auth2.yaml"},
+		{name: "pinned", e: ApiDetails{Name: "a", BaseURL: "https://127.0.0.1:1/api/v1", Pins: []string{pinOf("d")}}, cc: cc},
+		{name: "plain http", e: ApiDetails{Name: "a", BaseURL: "http://127.0.0.1:1/api/v1", ConfigFile: "/etc/tdns/tdns-auth.yaml"}, cc: cc, wantErr: "TLS only; fix: tdns-ncli config update a --cert"},
+		{name: "neither https nor unix", e: ApiDetails{Name: "a", BaseURL: "ftp://127.0.0.1:1/"}, cc: cc, wantErr: "neither https:// nor unix://"},
+		{name: "the socket needs nothing", e: ApiDetails{Name: "a", BaseURL: "unix:///var/run/tdns/x.sock"}, cc: CliClientConf{Cert: "/nonexistent/c.crt", Key: "/nonexistent/c.key"}},
+		{name: "no client certificate", e: ApiDetails{Name: "a", BaseURL: "https://127.0.0.1:1/api/v1", Pins: []string{pinOf("d")}},
+			cc: CliClientConf{Cert: "/nonexistent/c.crt", Key: "/nonexistent/c.key"}, wantErr: "fix: tdns-ncli client init"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			api, warn, err := newApiClientFor(tc.e, CliClientConf{Cert: "/nonexistent/c.crt", Key: "/nonexistent/c.key"})
+			api, warn, err := newApiClientFor(tc.e, tc.cc)
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 					t.Fatalf("err = %v, want %q", err, tc.wantErr)
 				}
 				return
 			}
-			if err != nil || api == nil {
-				t.Fatalf("err = %v", err)
-			}
-			if (warn != "") != tc.wantWarn {
-				t.Errorf("warning = %q, want one: %v", warn, tc.wantWarn)
+			if err != nil || api == nil || warn != "" {
+				t.Fatalf("err = %v, warning %q", err, warn)
 			}
 		})
-	}
-
-	// tdns-cli (verification not required) keeps its old default.
-	RequireServerVerification = false
-	if _, warn, err := newApiClientFor(ApiDetails{Name: "a", BaseURL: "https://127.0.0.1:1/api/v1"}, CliClientConf{}); err != nil || warn != "" {
-		t.Errorf("tdns-cli default: %q %v, want no error and no warning", warn, err)
-	}
-	if _, warn, err := newApiClientFor(ApiDetails{Name: "a", BaseURL: "http://192.0.2.1:1/api/v1"}, CliClientConf{}); err != nil || warn != "" {
-		t.Errorf("tdns-cli plain http: %q %v, want no error and no warning", warn, err)
 	}
 }
 
@@ -175,11 +173,11 @@ func TestEntryUsesTheDaemonSocket(t *testing.T) {
 	if got, addrs := daemonSocket(cfg); got != sock || len(addrs) != 1 || addrs[0] != "127.0.0.1:8085" {
 		t.Fatalf("daemonSocket = %q %q, want the default %s and 127.0.0.1:8085", got, addrs, sock)
 	}
-	e := ApiDetails{Name: "tdns-imr", BaseURL: "https://127.0.0.1:8085/api/v1", ApiKey: "k", AuthMethod: "X-API-Key",
-		TLSAuth: "pin", Pins: []string{pinOf("x")}, ConfigFile: cfg}
+	cc := testClientPair(t)
+	e := ApiDetails{Name: "imr", BaseURL: "https://127.0.0.1:8085/api/v1", Pins: []string{pinOf("x")}, ConfigFile: cfg}
 	socketOf := func(t *testing.T, e ApiDetails) string {
 		t.Helper()
-		c, _, err := newApiClientFor(e, CliClientConf{})
+		c, _, err := newApiClientFor(e, cc)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -212,7 +210,7 @@ func TestEntryUsesTheDaemonSocket(t *testing.T) {
 	}
 	// A command over the chosen socket names the entry's config, so that a
 	// daemon that took the socket since the check refuses it.
-	c, _, err := newApiClientFor(e, CliClientConf{})
+	c, _, err := newApiClientFor(e, cc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,10 +232,10 @@ func TestEntryUsesTheDaemonSocket(t *testing.T) {
 	mu.Lock()
 	runs = "/etc/tdns/other.yaml"
 	mu.Unlock()
-	if c, warn, err := newApiClientFor(e, CliClientConf{}); err != nil || c.Socket != "" || !strings.Contains(warn, "runs /etc/tdns/other.yaml") {
+	if c, warn, err := newApiClientFor(e, cc); err != nil || c.Socket != "" || !strings.Contains(warn, "runs /etc/tdns/other.yaml") {
 		t.Errorf("another daemon on the socket: socket %q, warning %q, err %v; want TCP and a warning naming it", c.Socket, warn, err)
 	}
-	if _, _, err := newApiClientFor(ApiDetails{Name: "tdns-imr", AuthMethod: "none", ConfigFile: cfg}, CliClientConf{}); err == nil || !strings.Contains(err.Error(), "runs /etc/tdns/other.yaml") {
+	if _, _, err := newApiClientFor(ApiDetails{Name: "imr", ConfigFile: cfg}, cc); err == nil || !strings.Contains(err.Error(), "runs /etc/tdns/other.yaml") {
 		t.Errorf("another daemon, socket-only entry: err = %v, want a refusal naming it", err)
 	}
 	mu.Lock()
@@ -246,12 +244,12 @@ func TestEntryUsesTheDaemonSocket(t *testing.T) {
 
 	// --tcp with an entry written as a socket entry: no TCP address to use.
 	ForceTCP = true
-	if _, _, err := newApiClientFor(ApiDetails{Name: "old", BaseURL: "unix://" + sock, AuthMethod: "none"}, CliClientConf{}); err == nil || !strings.Contains(err.Error(), "no TCP address for --tcp") {
+	if _, _, err := newApiClientFor(ApiDetails{Name: "old", BaseURL: "unix://" + sock}, CliClientConf{}); err == nil || !strings.Contains(err.Error(), "no TCP address for --tcp") {
 		t.Errorf("--tcp, socket entry: err = %v, want a refusal", err)
 	}
 	ForceTCP = false
 	// ping says which way it went: the socket is chosen at run time.
-	if c, _, err := newApiClientFor(e, CliClientConf{}); err != nil || pingHow(c, tdns.PingResponse{}) != sock {
+	if c, _, err := newApiClientFor(e, cc); err != nil || pingHow(c, tdns.PingResponse{}) != sock {
 		t.Errorf("ping's parentheses: %v", err)
 	}
 	ForceTCP = true
@@ -268,7 +266,7 @@ func TestEntryUsesTheDaemonSocket(t *testing.T) {
 		t.Errorf("an entry for another address: socket %q, want TCP", s)
 	}
 	// An entry with no TCP address at all is the socket's.
-	if s := socketOf(t, ApiDetails{Name: "tdns-imr", AuthMethod: "none", ConfigFile: cfg}); s != sock {
+	if s := socketOf(t, ApiDetails{Name: "imr", ConfigFile: cfg}); s != sock {
 		t.Errorf("a socket-only entry: socket %q, want %s", s, sock)
 	}
 
@@ -283,8 +281,8 @@ func TestEntryUsesTheDaemonSocket(t *testing.T) {
 		t.Errorf("socket: none: socket %q, want TCP", s)
 	}
 	// A socket-only entry (no baseurl) whose socket is off cannot be used.
-	sockOnly := ApiDetails{Name: "tdns-imr", AuthMethod: "none", ConfigFile: cfg}
-	if _, _, err := newApiClientFor(sockOnly, CliClientConf{}); err == nil || !strings.Contains(err.Error(), "no baseurl") {
+	sockOnly := ApiDetails{Name: "imr", ConfigFile: cfg}
+	if _, _, err := newApiClientFor(sockOnly, cc); err == nil || !strings.Contains(err.Error(), "no baseurl") {
 		t.Errorf("socket-only entry, socket off: err = %v, want one saying it has no baseurl", err)
 	}
 }
@@ -321,8 +319,7 @@ func TestHostPortDefaultPorts(t *testing.T) {
 // who the daemon took it for.
 func TestPingHow(t *testing.T) {
 	sock := tdns.NewClientWithOptions("a", "unix:///var/run/tdns/etc-tdns-tdns-auth.sock", tdns.ClientOptions{})
-	tlsc := tdns.NewClientWithOptions("a", "https://127.0.0.1:8989/api/v1", tdns.ClientOptions{Pins: []string{pinOf("a")}, AuthMethod: "X-API-Key", ApiKey: "k"})
-	plain := tdns.NewClientWithOptions("a", "http://127.0.0.1:8989/api/v1", tdns.ClientOptions{RootCA: "insecure", AuthMethod: "X-API-Key", ApiKey: "k"})
+	tlsc := tdns.NewClientWithOptions("a", "https://127.0.0.1:8989/api/v1", tdns.ClientOptions{Pins: []string{pinOf("a")}})
 	for _, tc := range []struct {
 		name string
 		api  *tdns.ApiClient
@@ -330,10 +327,8 @@ func TestPingHow(t *testing.T) {
 		want string
 	}{
 		{"socket", sock, tdns.PingResponse{Role: "admin", Via: "local socket", Identity: "local"}, "/var/run/tdns/etc-tdns-tdns-auth.sock"},
-		{"key over TLS", tlsc, tdns.PingResponse{Role: "admin", Via: "api key", Identity: "apikey"}, "TLS, admin"},
 		{"certificate", tlsc, tdns.PingResponse{Role: "read-write", Via: "certificate", Identity: "anna"}, "TLS, read-write, certificate anna"},
-		{"plain http", plain, tdns.PingResponse{Role: "admin", Via: "api key", Identity: "apikey"}, "no TLS, admin"},
-		{"older daemon", tlsc, tdns.PingResponse{Auth: "authenticated as apikey (admin) by api key"}, "TLS, authenticated as apikey (admin) by api key"},
+		{"older daemon", tlsc, tdns.PingResponse{Auth: "authenticated as anna (read-write) by certificate"}, "TLS, authenticated as anna (read-write) by certificate"},
 		{"oldest daemon", tlsc, tdns.PingResponse{}, "TLS"},
 	} {
 		if got := pingHow(tc.api, tc.pr); got != tc.want {
@@ -355,21 +350,21 @@ func asNcli(t *testing.T) {
 
 func TestPinRefusal(t *testing.T) {
 	asNcli(t)
-	err := fmt.Errorf("wrapped: %w", pinRefusal(ApiDetails{Name: "tdns-auth", ConfigFile: "/etc/tdns/tdns-auth.yaml"}, "its entry has no pin"))
+	err := fmt.Errorf("wrapped: %w", pinRefusal(ApiDetails{Name: "auth", ConfigFile: "/etc/tdns/tdns-auth.yaml"}, "its entry has no pin"))
 	var r clientRefusal
-	if !errors.As(err, &r) || r.entry != "tdns-auth" || r.fix != "tdns-ncli config update tdns-auth --repin" {
+	if !errors.As(err, &r) || r.entry != "auth" || r.fix != "tdns-ncli config update auth --cert" {
 		t.Errorf("refusal = %+v from %v", r, err)
 	}
-	if !strings.Contains(err.Error(), "not connecting to tdns-auth: its entry has no pin; fix: tdns-ncli config update") {
+	if !strings.Contains(err.Error(), "not connecting to auth: its entry has no pin; fix: tdns-ncli config update") {
 		t.Errorf("one-line form: %v", err)
 	}
-	if r := pinRefusal(ApiDetails{Name: "old"}, "x"); r.fix != "tdns-ncli config update old --repin --daemon-config <the daemon's config file>" {
+	if r := pinRefusal(ApiDetails{Name: "old"}, "x"); r.fix != "tdns-ncli config update old --cert --daemon-config /etc/tdns/tdns-old.yaml" {
 		t.Errorf("no config-file: fix = %q", r.fix)
 	}
 	// Read from another CLI config, the fix names it.
 	defer func(was *CliConf) { apiConfig = was }(apiConfig)
 	apiConfig = &CliConf{File: "/x/my cli.yaml"}
-	if r := pinRefusal(ApiDetails{Name: "a", ConfigFile: "/x/d.yaml"}, "x"); r.fix != "tdns-ncli --config '/x/my cli.yaml' config update a --repin" {
+	if r := pinRefusal(ApiDetails{Name: "a", ConfigFile: "/x/d.yaml"}, "x"); r.fix != "tdns-ncli --config '/x/my cli.yaml' config update a --cert" {
 		t.Errorf("another CLI config: fix = %q", r.fix)
 	}
 }
@@ -378,7 +373,7 @@ func TestPinRefusal(t *testing.T) {
 // config of this run, not one from before.
 func TestInitApiClientsRefusalNamesTheCliConfig(t *testing.T) {
 	withCleanRoleRegistry(t)
-	RegisterRole("auth", "tdns-auth")
+	RegisterRole("auth", "auth")
 	// InitApiClients changes the client tables: as they were afterwards.
 	errs, warns, pending := maps.Clone(apiClientErrors), maps.Clone(apiClientWarnings), maps.Clone(socketPending)
 	clients, api, was := maps.Clone(tdns.Globals.ApiClients), tdns.Globals.Api, apiConfig
@@ -388,28 +383,14 @@ func TestInitApiClientsRefusalNamesTheCliConfig(t *testing.T) {
 	})
 	apiConfig = &CliConf{File: "/x/old.yaml"}
 	conf := &CliConf{File: "/x/my cli.yaml", ApiServers: []ApiDetails{
-		{Name: "tdns-auth", BaseURL: "https://127.0.0.1:1/api/v1", AuthMethod: "certificate", TLSAuth: "pin"},
+		{Name: "auth", BaseURL: "https://127.0.0.1:1/api/v1"},
 	}}
 	if err := InitApiClients(conf); err != nil {
 		t.Fatal(err)
 	}
 	var r clientRefusal
-	if err := apiClientErrors["tdns-auth"]; !errors.As(err, &r) || !strings.HasPrefix(r.fix, "tdns-ncli --config '/x/my cli.yaml' config update tdns-auth --repin") {
+	if err := apiClientErrors["auth"]; !errors.As(err, &r) || !strings.HasPrefix(r.fix, "tdns-ncli --config '/x/my cli.yaml' config update auth --cert") {
 		t.Errorf("refusal = %+v (%v), want this run's CLI config named", r, err)
-	}
-}
-
-// With pins, the client ignores rootca, so a rootca: file that is gone does
-// not fail an entry that verifies by pin.
-func TestPinnedEntryIgnoresRootCA(t *testing.T) {
-	e := ApiDetails{Name: "a", BaseURL: "https://127.0.0.1:1/api/v1", TLSAuth: "pin", Pins: []string{pinOf("a")},
-		RootCA: "/nonexistent/ca.pem", AuthMethod: "none"}
-	if _, _, err := newApiClientFor(e, CliClientConf{}); err != nil {
-		t.Errorf("pinned entry with a stale rootca: %v", err)
-	}
-	e.TLSAuth, e.Pins = "pkix", nil
-	if _, _, err := newApiClientFor(e, CliClientConf{}); err == nil {
-		t.Error("a pkix entry with a missing rootca file was accepted")
 	}
 }
 
@@ -436,23 +417,17 @@ func TestReadCliClientConfMerges(t *testing.T) {
 	}
 }
 
-// A socket entry has no TLS and sends no credentials, so a leftover rootca:
-// or authmethod: certificate does not stop it. A pinned entry with a leftover
-// rootca: tlsa is checked, not skipped as a TLSA entry.
-func TestLeftoverSettingsDoNotStopAnEntry(t *testing.T) {
-	sockEntry := ApiDetails{Name: "s", BaseURL: "unix:///var/run/tdns/tdns-auth.sock", AuthMethod: "certificate", RootCA: "/nonexistent/ca.pem"}
-	if _, _, err := newApiClientFor(sockEntry, CliClientConf{Cert: "/nonexistent/c.crt", Key: "/nonexistent/c.key"}); err != nil {
-		t.Errorf("socket entry with leftover TLS settings: %v", err)
-	}
-
-	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+// config list --check pings a pinned entry with the client certificate.
+func TestCheckEntriesPingsAPinnedEntry(t *testing.T) {
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(tdns.PingResponse{Msg: "pong", Pings: 1, Pongs: 1})
 	}))
+	srv.TLS = &tls.Config{MinVersion: tls.VersionTLS13}
+	srv.StartTLS()
 	defer srv.Close()
-	pinned := ApiDetails{Name: "p", BaseURL: srv.URL + "/api/v1", AuthMethod: "none", TLSAuth: "pin",
-		Pins: []string{tdns.SPKISHA256(srv.Certificate())}, RootCA: "tlsa"}
-	if res := CheckEntries([]ApiDetails{pinned}, CliClientConf{}, 5*time.Second); !strings.HasPrefix(res[0], "ok") {
-		t.Errorf("pinned entry with a leftover rootca: tlsa: %q, want it checked", res[0])
+	pinned := ApiDetails{Name: "p", BaseURL: srv.URL + "/api/v1", Pins: []string{tdns.SPKISHA256(srv.Certificate())}}
+	if res := CheckEntries([]ApiDetails{pinned}, testClientPair(t), 5*time.Second); !strings.HasPrefix(res[0], "ok") {
+		t.Errorf("pinned entry: %q, want it checked", res[0])
 	}
 }
 
@@ -476,9 +451,9 @@ func TestClientInitNamesACustomPair(t *testing.T) {
 }
 
 // A socket URL spelled with another case is still the socket: the client
-// knows only "unix://", and taking it for TCP would read its rootca.
+// knows only "unix://", and taking it for TCP would refuse it.
 func TestUnixSchemeAnyCase(t *testing.T) {
-	e := ApiDetails{Name: "s", BaseURL: "UNIX:///var/run/tdns/Admin.sock", AuthMethod: "none", RootCA: "/nonexistent/ca.pem"}
+	e := ApiDetails{Name: "s", BaseURL: "UNIX:///var/run/tdns/Admin.sock"}
 	api, _, err := newApiClientFor(e, CliClientConf{})
 	if err != nil {
 		t.Fatalf("UNIX:// entry: %v", err)
@@ -494,24 +469,24 @@ func TestDuplicatePins(t *testing.T) {
 		t.Errorf("distinct pins warned: %v", w)
 	}
 	w := duplicatePins([]ApiDetails{{Name: "x", Pins: []string{a}}, {Name: "y", Pins: []string{b, a}}})
-	if len(w) != 1 || !strings.Contains(w[0], "x and y") {
+	if len(w) != 1 || !strings.Contains(w[0], "x and y have the same certificate pin") || strings.Contains(w[0], "key") {
 		t.Errorf("shared pin: %v", w)
 	}
 
-	// A key entry and a certificate entry of ONE daemon pin its key; that
-	// is not two daemons sharing a key.
+	// Two entries of ONE daemon have its pin; that is not two daemons
+	// sharing a certificate.
 	one := []ApiDetails{
-		{Name: "tdns-auth", BaseURL: "https://192.0.2.1:8989/api/v1", Pins: []string{a}},
-		{Name: "authkey", BaseURL: "https://192.0.2.1:8989/api/v1", Pins: []string{a}},
+		{Name: "auth", BaseURL: "https://192.0.2.1:8989/api/v1", Pins: []string{a}},
+		{Name: "authtoo", BaseURL: "https://192.0.2.1:8989/api/v1", Pins: []string{a}},
 	}
 	if w := duplicatePins(one); len(w) != 0 {
 		t.Errorf("two entries of one daemon warned: %v", w)
 	}
-	// A third entry for another daemon with the same key still warns, and
+	// A third entry for another daemon with the same pin still warns, and
 	// names each daemon once.
 	w = duplicatePins(append(one, ApiDetails{Name: "other", BaseURL: "https://192.0.2.2:8989/api/v1", Pins: []string{a}}))
-	if len(w) != 1 || !strings.Contains(w[0], "tdns-auth and other") {
-		t.Errorf("two daemons sharing a key: %v", w)
+	if len(w) != 1 || !strings.Contains(w[0], "auth and other") {
+		t.Errorf("two daemons sharing a certificate: %v", w)
 	}
 }
 
@@ -561,11 +536,11 @@ func TestSocketCheckedOnFirstUse(t *testing.T) {
 	}
 
 	withCleanRoleRegistry(t)
-	RegisterRole("auth", "tdns-auth")
-	RegisterRole("imr", "tdns-imr")
-	conf := &CliConf{ApiServers: []ApiDetails{
-		{Name: "tdns-auth", BaseURL: "https://127.0.0.1:8989/api/v1", ApiKey: "k", AuthMethod: "X-API-Key", TLSAuth: "pin", Pins: []string{pinOf("a")}, ConfigFile: authCfg},
-		{Name: "tdns-imr", AuthMethod: "none", ConfigFile: imrCfg}, // no baseurl: the socket or nothing
+	RegisterRole("auth", "auth")
+	RegisterRole("imr", "imr")
+	conf := &CliConf{Client: testClientPair(t), ApiServers: []ApiDetails{
+		{Name: "auth", BaseURL: "https://127.0.0.1:8989/api/v1", Pins: []string{pinOf("a")}, ConfigFile: authCfg},
+		{Name: "imr", ConfigFile: imrCfg}, // no baseurl: the socket or nothing
 	}}
 	out := captureStdout(t, func() {
 		if err := InitApiClients(conf); err != nil {
@@ -577,11 +552,11 @@ func TestSocketCheckedOnFirstUse(t *testing.T) {
 	}
 	// Until first use, code reading the client table directly has the TCP
 	// client; an entry with no TCP address has none yet.
-	if c := tdns.Globals.ApiClients["tdns-auth"]; c == nil || c.Socket != "" {
-		t.Errorf("before use: tdns-auth client %+v, want the TCP one", c)
+	if c := tdns.Globals.ApiClients["auth"]; c == nil || c.Socket != "" {
+		t.Errorf("before use: auth client %+v, want the TCP one", c)
 	}
-	if c := tdns.Globals.ApiClients["tdns-imr"]; c != nil {
-		t.Errorf("before use: tdns-imr client over %q, want none", c.BaseUrl)
+	if c := tdns.Globals.ApiClients["imr"]; c != nil {
+		t.Errorf("before use: imr client over %q, want none", c.BaseUrl)
 	}
 
 	out += captureStdout(t, func() {
@@ -595,11 +570,11 @@ func TestSocketCheckedOnFirstUse(t *testing.T) {
 	if n, m := count(authCfg), count(imrCfg); n != 1 || m != 0 {
 		t.Errorf("after two uses of auth: %d and %d identity requests, want 1 and 0", n, m)
 	}
-	if c := ApiClientByName("tdns-imr"); c == nil || c.Socket != tdns.ApiSocketPath("", imrCfg) {
-		t.Errorf("tdns-imr by name: %+v, want the socket", c)
+	if c := ApiClientByName("imr"); c == nil || c.Socket != tdns.ApiSocketPath("", imrCfg) {
+		t.Errorf("imr by name: %+v, want the socket", c)
 	}
 	if m := count(imrCfg); m != 1 {
-		t.Errorf("tdns-imr: %d identity requests, want 1", m)
+		t.Errorf("imr: %d identity requests, want 1", m)
 	}
 	if strings.Contains(out, "Status:") {
 		t.Errorf("the socket check printed under -v: %q", out)
@@ -683,14 +658,14 @@ func TestClientCommandsCallTheDaemon(t *testing.T) {
 	cfg := filepath.Join(dir, "tdns-auth.yaml")
 	writeFile(t, cfg, daemonYAML("TDNS-AUTH", "127.0.0.1:8989", "k", "   socket: "+sock+"\n"))
 	withCleanRoleRegistry(t)
-	RegisterRole("auth", "tdns-auth")
+	RegisterRole("auth", "auth")
 	saved := apiConfig
 	t.Cleanup(func() { apiConfig = saved })
 	apiConfig = nil // root with no CLI config: --daemon-config names the daemon
 
 	d := newFakeDaemon(t, sock, cfg)
 	d.mu.Lock()
-	d.reply = tdns.AccessResponse{Msg: "Added anna (read-write).\nIn force: 1 client(s), keyauth on.", File: filepath.Join(dir, "access.yaml"), KeyAuth: true,
+	d.reply = tdns.AccessResponse{Msg: "Added anna (read-write).\nIn force: 1 client(s).", File: filepath.Join(dir, "access.yaml"),
 		Clients:    []tdns.ApiAccessStatusClient{{Name: "anna", Pin: pinOf("anna"), Role: "read-write", Comment: "laptop"}},
 		ServerPins: []string{pinOf("server")}}
 	d.mu.Unlock()
@@ -725,7 +700,6 @@ func TestClientCommandsCallTheDaemon(t *testing.T) {
 		{[]string{"disable", "anna"}, tdns.AccessPost{Command: "disable", Name: "anna"}},
 		{[]string{"enable", "anna"}, tdns.AccessPost{Command: "enable", Name: "anna"}},
 		{[]string{"set-role", "anna", "read-only", "--dry-run"}, tdns.AccessPost{Command: "set-role", Name: "anna", Role: "read-only", DryRun: true}},
-		{[]string{"keyauth", "off"}, tdns.AccessPost{Command: "keyauth", KeyAuth: "off"}},
 	} {
 		run(t, append(tc.args, "--daemon-config", cfg)...)
 		if ap, _ := d.last(t); ap != tc.want {
@@ -733,14 +707,14 @@ func TestClientCommandsCallTheDaemon(t *testing.T) {
 		}
 	}
 	out = run(t, "list", "--daemon-config", cfg)
-	for _, want := range []string{"Access file: " + d.reply.File, "keyauth: on", "anna", "# laptop", "Server pins", pinOf("server")} {
+	for _, want := range []string{"Access file: " + d.reply.File, "anna", "# laptop", "Server pins", pinOf("server")} {
 		if !strings.Contains(out, want) {
 			t.Errorf("list does not print %q:\n%s", want, out)
 		}
 	}
 
 	// Without --daemon-config: the role's entry's config-file:.
-	apiConfig = &CliConf{ApiServers: []ApiDetails{{Name: "tdns-auth", BaseURL: "https://127.0.0.1:1/api/v1", ConfigFile: cfg}}}
+	apiConfig = &CliConf{ApiServers: []ApiDetails{{Name: "auth", BaseURL: "https://127.0.0.1:1/api/v1", ConfigFile: cfg}}}
 	sent := count()
 	run(t, "enable", "anna")
 	if got := count() - sent; got != 1 {
@@ -753,7 +727,7 @@ func TestClientCommandsCallTheDaemon(t *testing.T) {
 	// An entry without config-file: names no daemon, unless it is the
 	// default daemon's own socket: refused, nothing sent. --daemon-config
 	// settles it.
-	apiConfig = &CliConf{ApiServers: []ApiDetails{{Name: "tdns-auth", BaseURL: "https://127.0.0.1:1/api/v1"}}}
+	apiConfig = &CliConf{ApiServers: []ApiDetails{{Name: "auth", BaseURL: "https://127.0.0.1:1/api/v1"}}}
 	sent = count()
 	if err := runAccess("auth", "", tdns.AccessPost{Command: "enable", Name: "anna"}); err == nil || !strings.Contains(err.Error(), "has no config-file:") {
 		t.Errorf("entry without config-file:: %v, want refused", err)
@@ -867,21 +841,18 @@ func TestSocketErrnoNotASocket(t *testing.T) {
 	}
 }
 
-// The plain-http warning of an entry already in the CLI config names the
-// command that switches it to https with pins, config update --cert (config
-// add writes new entries only), with --daemon-config when the entry has no
-// config-file:.
-func TestPlainHttpWarningNamesConfigUpdate(t *testing.T) {
-	saved := RequireServerVerification
-	t.Cleanup(func() { RequireServerVerification = saved })
-	RequireServerVerification = true
+// A plain-http entry is refused with the command that switches it to https
+// with pins, config update --cert (config add writes new entries only), with
+// --daemon-config when the entry has no config-file:.
+func TestPlainHttpRefusalNamesConfigUpdate(t *testing.T) {
 	asNcli(t)
-	e := ApiDetails{Name: "remote", BaseURL: "http://192.0.2.1:8989/api/v1", ApiKey: "k", AuthMethod: "X-API-Key", ConfigFile: "/etc/tdns/tdns-auth.yaml"}
-	if _, warn, err := buildApiClient(e, CliClientConf{}, "", ""); err != nil || !strings.HasSuffix(warn, "use https with pins: tdns-ncli config update remote --cert") {
-		t.Errorf("warning %q, %v", warn, err)
+	e := ApiDetails{Name: "remote", BaseURL: "http://192.0.2.1:8989/api/v1", ConfigFile: "/etc/tdns/tdns-auth.yaml"}
+	var r clientRefusal
+	if _, _, err := buildApiClient(e, CliClientConf{}, "", ""); !errors.As(err, &r) || r.fix != "tdns-ncli config update remote --cert" {
+		t.Errorf("refusal %+v (%v)", r, err)
 	}
 	e.ConfigFile = ""
-	if _, warn, _ := buildApiClient(e, CliClientConf{}, "", ""); !strings.HasSuffix(warn, "config update remote --cert --daemon-config <the daemon's config file>") {
-		t.Errorf("no config-file: warning %q", warn)
+	if _, _, err := buildApiClient(e, CliClientConf{}, "", ""); !errors.As(err, &r) || r.fix != "tdns-ncli config update remote --cert --daemon-config /etc/tdns/tdns-remote.yaml" {
+		t.Errorf("no config-file: refusal %+v (%v)", r, err)
 	}
 }

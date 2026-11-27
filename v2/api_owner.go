@@ -256,7 +256,7 @@ func (conf *Config) apiOwnerClientWarnings(owner string) []string {
 		return nil
 	}
 	st := conf.Internal.ApiAccess.load()
-	if st == nil || !st.Enabled || st.Err != nil {
+	if st == nil || st.Missing || st.Err != nil {
 		return nil
 	}
 	for _, c := range st.Clients {

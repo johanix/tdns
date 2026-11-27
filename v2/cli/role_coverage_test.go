@@ -142,7 +142,7 @@ func TestConfigCheckResolvesPerInstancePaths(t *testing.T) {
 	t.Cleanup(func() { apiConfig = saved })
 
 	apiConfig = &CliConf{ApiServers: []ApiDetails{
-		{Name: "tdns-auth", BaseURL: "https://127.0.0.1:8989/api/v1"},
+		{Name: "auth", BaseURL: "https://127.0.0.1:8989/api/v1"},
 		{Name: "sectdns", Role: "auth", BaseURL: "https://127.0.0.1:8990/api/v1",
 			ConfigFile: "/etc/tdns/sec-tdns-auth.yaml"},
 		{Name: "thirdauth", Role: "auth", BaseURL: "https://127.0.0.1:8991/api/v1"},
@@ -179,20 +179,20 @@ func TestConfigCheckResolvesPerInstancePaths(t *testing.T) {
 // config-file: must work the same way on a canonical entry and an instance
 // entry. It did not: an instance's entry is named after the role ("sectdns"),
 // so a raw-name lookup found it, while a built-in role ("auth") resolves
-// through RegisterRole to an entry named "tdns-auth" and the raw lookup missed.
+// through RegisterRole to the role's entry and the raw lookup missed.
 // The key silently did nothing on every canonical entry. (CodeRabbit, PR #544.)
 func TestConfigFileHonouredOnCanonicalAndInstanceEntries(t *testing.T) {
 	saved := apiConfig
 	t.Cleanup(func() { apiConfig = saved })
 
 	apiConfig = &CliConf{ApiServers: []ApiDetails{
-		{Name: "tdns-auth", ConfigFile: "/etc/tdns/custom-auth.yaml"},
-		{Name: "tdns-agent", ConfigFile: "/etc/tdns/custom-agent.yaml"},
+		{Name: "auth", ConfigFile: "/etc/tdns/custom-auth.yaml"},
+		{Name: "agent", ConfigFile: "/etc/tdns/custom-agent.yaml"},
 		{Name: "sectdns", Role: "auth", ConfigFile: "/etc/tdns/custom-sectdns.yaml"},
 	}}
 
 	for _, tc := range []struct{ role, want string }{
-		{"auth", "/etc/tdns/custom-auth.yaml"},       // via RegisterRole -> "tdns-auth"
+		{"auth", "/etc/tdns/custom-auth.yaml"},       // via RegisterRole -> "auth"
 		{"agent", "/etc/tdns/custom-agent.yaml"},     // ditto
 		{"sectdns", "/etc/tdns/custom-sectdns.yaml"}, // raw name
 	} {
@@ -204,7 +204,7 @@ func TestConfigFileHonouredOnCanonicalAndInstanceEntries(t *testing.T) {
 	// With no config-file: anywhere, both fall back to the compiled-in default
 	// for the flavour -- the instance must not inherit the canonical entry's.
 	apiConfig = &CliConf{ApiServers: []ApiDetails{
-		{Name: "tdns-auth"},
+		{Name: "auth"},
 		{Name: "sectdns", Role: "auth"},
 	}}
 	for _, role := range []string{"auth", "sectdns"} {
@@ -266,7 +266,7 @@ func TestAgentFlavouredInstanceIsClassifiedAsAnAgent(t *testing.T) {
 	t.Cleanup(func() { apiConfig = saved })
 
 	apiConfig = &CliConf{ApiServers: []ApiDetails{
-		{Name: "tdns-agent", ConfigFile: "/etc/tdns/tdns-agent.yaml"},
+		{Name: "agent", ConfigFile: "/etc/tdns/tdns-agent.yaml"},
 		{Name: "secagent", Role: "agent", ConfigFile: "/etc/tdns/sec-tdns-agent.yaml"},
 		{Name: "sectdns", Role: "auth"},
 	}}

@@ -54,8 +54,8 @@ func TestAgentInstanceZoneCommandsReachTheirOwnClient(t *testing.T) {
 
 	savedClients := tdns.Globals.ApiClients
 	tdns.Globals.ApiClients = map[string]*tdns.ApiClient{
-		"tdns-agent": tdns.NewClient("tdns-agent", "https://127.0.0.1:8987/api/v1", "k1", "X-API-Key", "insecure"),
-		"sectagent":  tdns.NewClient("sectagent", "https://127.0.0.1:8988/api/v1", "k2", "X-API-Key", "insecure"),
+		"agent":     tdns.NewClientWithOptions("agent", "https://127.0.0.1:8987/api/v1", tdns.ClientOptions{}),
+		"sectagent": tdns.NewClientWithOptions("sectagent", "https://127.0.0.1:8988/api/v1", tdns.ClientOptions{}),
 	}
 	t.Cleanup(func() { tdns.Globals.ApiClients = savedClients })
 
@@ -81,8 +81,8 @@ func TestAgentInstanceZoneCommandsReachTheirOwnClient(t *testing.T) {
 			continue
 		}
 		cc := find(t, canon, path)
-		if api, err := GetApiClientForCmd(cc, false); err != nil || api.Name != "tdns-agent" {
-			t.Errorf("%s via agent reached %v (%v), want tdns-agent", path, api, err)
+		if api, err := GetApiClientForCmd(cc, false); err != nil || api.Name != "agent" {
+			t.Errorf("%s via agent reached %v (%v), want agent", path, api, err)
 		}
 	}
 }
@@ -113,7 +113,7 @@ func TestAgentInstanceIsWired(t *testing.T) {
 	withCleanRoleRegistry(t)
 	root := &cobra.Command{Use: "tdns-ncli"}
 	w := WireInstanceTrees(root, []ApiDetails{
-		{Name: "tdns-agent", BaseURL: "https://127.0.0.1:8987/api/v1"},
+		{Name: "agent", BaseURL: "https://127.0.0.1:8987/api/v1"},
 		{Name: "sectagent", Role: "agent", BaseURL: "https://127.0.0.1:8988/api/v1"},
 	})
 	if len(w) != 0 {

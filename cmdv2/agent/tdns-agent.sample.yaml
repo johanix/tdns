@@ -48,19 +48,21 @@ listeners:
 
 apiserver:
    addresses:     	[ 127.0.0.1:8987 ]
-   apikey:         	winter-is-coming-santa-stuck-in-chimney
    certfile:		/etc/tdns/certs/localhost.crt
    keyfile:		/etc/tdns/certs/localhost.key
-   # Local admin socket: the management API without TLS or a key, for root
-   # on this host (whoever can open the socket is admin). The directory is
+   # Local admin socket: the management API without TLS, for root on this
+   # host (whoever can open the socket is admin). The directory is
    # created 0700 if missing; one that group or others can enter is refused.
    # tdns-ncli config add uses it when run as root.
    socket:     /var/run/tdns/tdns-agent.sock
-   # Network clients by certificate, with roles (read-only, read-write); with
-   # it the API key is read-write and admin is the socket's alone. Requires
-   # socket:. Managed with `tdns-ncli <daemon> client ...`; see
-   # guide/config-tdns-auth.md. A configured file that cannot be used closes
-   # the TCP API (503), so create it before enabling this line.
+   # Network clients, by certificate pin, with roles (read-only,
+   # read-write): the access file. It is always read, at
+   # <config dir>/<config name>-access.yaml, here /etc/tdns/tdns-agent-access.yaml. Without it the
+   # daemon takes no remote clients and the socket is the only way in.
+   # Create it to take them (touch is enough; it must not be writable by
+   # group or others), then add clients with tdns-ncli <daemon> client ...
+   # or tdns-ncli config add. The daemon writes what is in it and never
+   # creates it. access-file: only moves it; see guide/config-tdns-auth.md.
    # access-file: /etc/tdns/tdns-agent-access.yaml
 
 server:

@@ -29,8 +29,8 @@ var (
 // "zone update" command, alongside the interactive "create" subtree.
 //
 // --via is required and has no default. The two channels are not
-// interchangeable: the API bypasses update-policy because the API key is the
-// credential, while DDNS enforces it. Defaulting to either one would mean an
+// interchangeable: the API bypasses update-policy because a read-write
+// client of the management API is trusted, while DDNS enforces it. Defaulting to either one would mean an
 // operator could get a different authorization model than they thought they
 // asked for, purely by omitting a flag.
 func AttachZoneUpdateVerbs(c *cobra.Command, role string) {
@@ -233,7 +233,7 @@ func runZoneUpdateVerb(role, verb string) {
 	case "":
 		fmt.Printf("Error: --via is required (\"api\" or \"ddns\").\n\n" +
 			"The two channels differ in authorization: the API bypasses update-policy\n" +
-			"(the API key is the credential), DDNS enforces it. There is deliberately\n" +
+			"(a read-write client is trusted), DDNS enforces it. There is deliberately\n" +
 			"no default.\n")
 		os.Exit(1)
 	default:

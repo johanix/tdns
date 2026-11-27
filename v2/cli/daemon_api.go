@@ -27,18 +27,15 @@ type DaemonApi struct {
 	Role string
 	// Addresses are apiserver.addresses, verbatim.
 	Addresses []string
-	// ApiKey is apiserver.apikey.
-	ApiKey string
 	// Socket is apiserver.socket, the daemon's local admin socket, or "".
 	Socket string
 	// SocketError says why Socket is "" although apiserver.socket names a
 	// path: one the daemon refuses to serve.
 	SocketError string
-	// AccessFile is apiserver.access-file, or "".
+	// AccessFile is the daemon's access file: apiserver.access-file, or
+	// the default next to its config (tdns.ApiAccessFilePath), as the
+	// daemon reads it.
 	AccessFile string
-	// UseTLS is apiserver.usetls, which the daemon defaults to true when the
-	// key is absent (v2/parseconfig.go), so absent must read as true here too.
-	UseTLS bool
 	// Warnings are things worth telling the operator that did not stop the
 	// read.
 	Warnings []string
@@ -91,7 +88,7 @@ func ReadDaemonApi(path, roleOverride string) (*DaemonApi, error) {
 	// The socket the daemon serves: apiserver.socket, or by default one named
 	// after its config file (tdns.ApiSocketPath, which the daemon uses too).
 	out.Socket = tdns.ApiSocketPath(v.GetString("apiserver.socket"), abs)
-	out.AccessFile = v.GetString("apiserver.access-file")
+	out.AccessFile = tdns.ApiAccessFilePath(v.GetString("apiserver.access-file"), abs)
 	if out.Socket != "" {
 		// The daemon serves no socket on a path it refuses, so there is
 		// nothing there to address.
@@ -103,15 +100,6 @@ func ReadDaemonApi(path, roleOverride string) (*DaemonApi, error) {
 	}
 	if len(out.Addresses) == 0 && out.Socket == "" {
 		return fail(fmt.Errorf("%s: neither apiserver.addresses nor apiserver.socket is set, so this daemon has no management API to address", abs))
-	}
-	// The key is what a TCP entry sends; a socket entry sends none.
-	out.ApiKey = v.GetString("apiserver.apikey")
-	if out.ApiKey == "" && out.Socket == "" {
-		return fail(fmt.Errorf("%s: apiserver.apikey is not set", abs))
-	}
-	out.UseTLS = true
-	if v.IsSet("apiserver.usetls") {
-		out.UseTLS = v.GetBool("apiserver.usetls")
 	}
 
 	if roleOverride != "" {
@@ -160,7 +148,7 @@ func daemonSocket(cfg string) (sock string, hostPorts []string) {
 		return "", nil
 	}
 	for _, a := range v.GetStringSlice("apiserver.addresses") {
-		if u, err := apiBaseURL(a, true); err == nil {
+		if u, err := apiBaseURL(a); err == nil {
 			hostPorts = append(hostPorts, hostPort(u))
 		}
 	}
@@ -288,12 +276,12 @@ func rolesFromWords(s string) []string {
 }
 
 // apiBaseURL turns one apiserver.addresses entry into the base URL the CLI
-// uses.
+// uses: https, as the TCP API is TLS only.
 //
 // A wildcard listen address (0.0.0.0, ::, or no host) is where the daemon
 // listens, not where a client connects, so it becomes loopback: the CLI and
 // the daemon run on the same host. Anything else is used as written.
-func apiBaseURL(addr string, useTLS bool) (string, error) {
+func apiBaseURL(addr string) (string, error) {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
 		return "", fmt.Errorf("apiserver.addresses entry %q is not host:port: %w", addr, err)
@@ -308,9 +296,6 @@ func apiBaseURL(addr string, useTLS bool) (string, error) {
 		host = "::1"
 	}
 	scheme := "https"
-	if !useTLS {
-		scheme = "http"
-	}
 	// Built as a url.URL, so an IPv6 zone (fe80::1%eth0) comes out as %25eth0,
 	// which is what a URL parser takes back; a raw % does not parse.
 	u := url.URL{Scheme: scheme, Host: net.JoinHostPort(host, port), Path: "/api/v1"}

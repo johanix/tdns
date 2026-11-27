@@ -20,7 +20,6 @@ import (
 var (
 	certCaller   = ApiIdentity{Name: "provisioner", Role: RoleReadWrite, Via: ApiViaCertificate}
 	socketCaller = ApiIdentity{Name: "local", Role: RoleAdmin, Via: ApiViaSocket}
-	keyCaller    = ApiIdentity{Name: "apikey", Role: RoleReadWrite, Via: ApiViaKey}
 )
 
 func TestApiIdentityApiOwner(t *testing.T) {
@@ -30,7 +29,6 @@ func TestApiIdentityApiOwner(t *testing.T) {
 	}{
 		{certCaller, "cert:provisioner"},
 		{socketCaller, ApiOwnerApi},
-		{keyCaller, ApiOwnerApi},
 		{ApiIdentity{Via: ApiViaCertificate}, ApiOwnerApi}, // no name, nothing to record
 	} {
 		if got := tc.id.ApiOwner(); got != tc.want {
@@ -254,14 +252,13 @@ func secondaryAdd(zone string) ZonePost {
 }
 
 // zone add records the caller's API owner: a certificate client's name, and
-// "api" for the socket, the API key and a request without an identity. The
+// "api" for the socket and a request without an identity. The
 // owner is in the dynamic config and in both listings, and a modify keeps it.
 func TestZoneAddRecordsTheCallersApiOwner(t *testing.T) {
 	ownerTestConf(t)
 	for zone, id := range map[string]*ApiIdentity{
 		"cert.example.":   &certCaller,
 		"socket.example.": &socketCaller,
-		"key.example.":    &keyCaller,
 		"none.example.":   nil,
 	} {
 		if resp := postZone(t, secondaryAdd(zone), id); resp.Error {
@@ -271,7 +268,6 @@ func TestZoneAddRecordsTheCallersApiOwner(t *testing.T) {
 	want := map[string]string{
 		"cert.example.":   "cert:provisioner",
 		"socket.example.": ApiOwnerApi,
-		"key.example.":    ApiOwnerApi,
 		"none.example.":   ApiOwnerApi,
 	}
 	persisted := persistedOwners(t)

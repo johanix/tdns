@@ -218,8 +218,8 @@ func TestAppClientZoneScope(t *testing.T) {
 			t.Errorf("update of the %s zone: %q, want it past the API owner check", kind, resp.ErrorMsg)
 		}
 	}
-	// An operator, by certificate, the socket or the key: as before.
-	for _, id := range []*ApiIdentity{&certCaller, &socketCaller, &keyCaller} {
+	// An operator, by certificate or the socket: as before.
+	for _, id := range []*ApiIdentity{&certCaller, &socketCaller} {
 		for _, kind := range []string{"other", "api", "config"} {
 			resp := postZone(t, ZonePost{Command: "update", Zone: z[kind], UpdateVerb: "addrr"}, id)
 			if refusedForApp(resp.ErrorMsg) {
@@ -713,31 +713,29 @@ func TestAppClientsOverTheNetwork(t *testing.T) {
 
 	for _, tc := range []struct {
 		name, path, cert string
-		key              bool
 		body             string
 		want             int
 		wantBody         string
 	}{
-		{"ping is open", "/api/v1/ping", "provisioner", false, "", 200, "provisioner (read-write, application client) by certificate"},
-		{"config status is refused", "/api/v1/config", "provisioner", false, `{"Command":"status"}`, 403, "config status: not available to application clients"},
-		{"command status is refused", "/api/v1/command", "provisioner", false, `{"Command":"status"}`, 403, "command status: not available to application clients"},
-		{"a route of an add-on is refused", "/api/v1/t-rw", "provisioner", false, "", 403, "t-rw: not available to application clients"},
+		{"ping is open", "/api/v1/ping", "provisioner", "", 200, "provisioner (read-write, application client) by certificate"},
+		{"config status is refused", "/api/v1/config", "provisioner", `{"Command":"status"}`, 403, "config status: not available to application clients"},
+		{"command status is refused", "/api/v1/command", "provisioner", `{"Command":"status"}`, 403, "command status: not available to application clients"},
+		{"a route of an add-on is refused", "/api/v1/t-rw", "provisioner", "", 403, "t-rw: not available to application clients"},
 		// By the role check, which comes first: such a command needs admin.
-		{"an unreadable command is refused", "/api/v1/zone", "provisioner", false, `{"command":"list-zones"}{}`, 403, "needs admin"},
-		{"the role comes first", "/api/v1/zone", "reader", false, `{"Command":"update","Zone":"own.example."}`, 403, "needs read-write; reader is read-only"},
-		{"another's zone, in the handler", "/api/v1/zone", "provisioner", false, `{"Command":"get-name","Zone":"other.example."}`, 200, "not a zone of API owner cert:provisioner"},
-		{"an operator: config status", "/api/v1/config", "ops", false, `{"Command":"status"}`, 200, ""},
-		{"an operator: another's zone", "/api/v1/zone", "ops", false, `{"Command":"list-zones","Zone":"other.example."}`, 200, "other.example."},
-		{"the key: config status", "/api/v1/config", "", true, `{"Command":"status"}`, 200, ""},
+		{"an unreadable command is refused", "/api/v1/zone", "provisioner", `{"command":"list-zones"}{}`, 403, "needs admin"},
+		{"the role comes first", "/api/v1/zone", "reader", `{"Command":"update","Zone":"own.example."}`, 403, "needs read-write; reader is read-only"},
+		{"another's zone, in the handler", "/api/v1/zone", "provisioner", `{"Command":"get-name","Zone":"other.example."}`, 200, "not a zone of API owner cert:provisioner"},
+		{"an operator: config status", "/api/v1/config", "ops", `{"Command":"status"}`, 200, ""},
+		{"an operator: another's zone", "/api/v1/zone", "ops", `{"Command":"list-zones","Zone":"other.example."}`, 200, "other.example."},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			st, body := e.call(t, tc.path, tc.cert, tc.key, tc.body)
+			st, body := e.call(t, tc.path, tc.cert, tc.body)
 			if st != tc.want || !strings.Contains(body, tc.wantBody) {
 				t.Errorf("%d %q, want %d containing %q", st, body, tc.want, tc.wantBody)
 			}
 		})
 	}
-	_, body := e.call(t, "/api/v1/zone", "provisioner", false, `{"Command":"list-zones"}`)
+	_, body := e.call(t, "/api/v1/zone", "provisioner", `{"Command":"list-zones"}`)
 	var resp ZoneResponse
 	if err := json.Unmarshal([]byte(body), &resp); err != nil || len(resp.Zones) != 2 || resp.Zones[z["own"]].Name == "" {
 		t.Errorf("list-zones over the network: %v %s, want the own and the granted zone", err, body)
@@ -748,7 +746,7 @@ func TestAppClientsOverTheNetwork(t *testing.T) {
 
 	e.conf.ApiServer.AppClients = nil
 	e.conf.reloadApiAccess()
-	if st, body := e.call(t, "/api/v1/config", "provisioner", false, `{"Command":"status"}`); st != 200 {
+	if st, body := e.call(t, "/api/v1/config", "provisioner", `{"Command":"status"}`); st != 200 {
 		t.Errorf("out of app-clients, config status: %d %q, want 200 as an operator", st, body)
 	}
 }
@@ -758,13 +756,13 @@ func TestAppClientsOverTheNetwork(t *testing.T) {
 func TestNoAppClientsNoChange(t *testing.T) {
 	certs, pins := clientCerts(t, "provisioner")
 	e := newAuthEnv(t, "clients:\n  - {name: provisioner, pin: "+pins["provisioner"]+", role: read-write}\n", certs)
-	if st, body := e.call(t, "/api/v1/ping", "provisioner", false, ""); st != 200 || strings.Contains(body, "application") {
+	if st, body := e.call(t, "/api/v1/ping", "provisioner", ""); st != 200 || strings.Contains(body, "application") {
 		t.Errorf("ping: %d %q", st, body)
 	}
-	if st, body := e.call(t, "/api/v1/config", "provisioner", false, `{"Command":"status"}`); st != 200 {
+	if st, body := e.call(t, "/api/v1/config", "provisioner", `{"Command":"status"}`); st != 200 {
 		t.Errorf("config status: %d %q", st, body)
 	}
-	if st, _ := e.call(t, "/api/v1/t-rw", "provisioner", false, ""); st != 200 {
+	if st, _ := e.call(t, "/api/v1/t-rw", "provisioner", ""); st != 200 {
 		t.Errorf("an add-on's read-write route: %d", st)
 	}
 	if a := e.conf.apiAccessStatus(); a == nil || len(a.AppClients) != 0 {
@@ -819,7 +817,7 @@ func TestAppClientsSwapWithTheAccessFile(t *testing.T) {
 	req := func() (ApiIdentity, int, string) {
 		r := httptest.NewRequest(http.MethodPost, "/api/v1/ping", nil)
 		r.TLS = &tls.ConnectionState{Version: tls.VersionTLS13, PeerCertificates: []*x509.Certificate{leaf}}
-		return e.conf.authenticateApiRequest(r, e.key)
+		return e.conf.authenticateApiRequest(r)
 	}
 	var stop atomic.Bool
 	var published atomic.Int64
@@ -880,12 +878,13 @@ func TestAppClientsNoteWhenTheFirstAccessFileDoesNotLoad(t *testing.T) {
 	h := e.conf.Internal.ApiAccess
 	e.conf.ApiServer.AccessFile = filepath.Join(t.TempDir(), "absent.yaml")
 	e.conf.ApiServer.AppClients = []string{"anna"}
-	msg := e.conf.reloadApiAccess()
-	if !strings.Contains(msg, "(the running policy is unchanged)") || !strings.Contains(msg, "app-clients is NOT applied either") {
-		t.Errorf("a first access file that does not load, with app-clients: %q", msg)
+	// A file that is not there is no remote clients, application clients
+	// included: nothing to apply them to.
+	if msg := e.conf.reloadApiAccess(); !strings.Contains(msg, "No access file") {
+		t.Errorf("a first access file that is not there, with app-clients: %q", msg)
 	}
-	if st := h.load(); st == nil || st.Enabled || len(st.AppClients) != 0 {
-		t.Errorf("the running policy changed: %+v", st)
+	if st := h.load(); st == nil || !st.Missing || len(st.AppClients) != 0 {
+		t.Errorf("the running policy: %+v, want no file and no application clients", st)
 	}
 	e.conf.ApiServer.AppClients = nil
 	if msg := e.conf.reloadApiAccess(); strings.Contains(msg, "app-clients") {
@@ -900,7 +899,7 @@ func TestAppClientsNoteWhenTheFirstAccessFileDoesNotLoad(t *testing.T) {
 	}
 	e.conf.ApiServer.AccessFile = broken
 	e.conf.initApiAccess()
-	if st := h.load(); st == nil || !st.Enabled || st.Err == nil {
+	if st := h.load(); st == nil || st.Err == nil {
 		t.Fatalf("a start with a broken file: %+v, want the policy closed", st)
 	}
 	e.conf.ApiServer.AppClients = []string{"anna"}

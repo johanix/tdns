@@ -39,21 +39,21 @@ func fakeExportDaemon(t *testing.T) *[]string {
 	}))
 	t.Cleanup(srv.Close)
 
-	saved, had := tdns.Globals.ApiClients["tdns-auth"]
+	saved, had := tdns.Globals.ApiClients["auth"]
 	if tdns.Globals.ApiClients == nil {
 		tdns.Globals.ApiClients = map[string]*tdns.ApiClient{}
 	}
-	tdns.Globals.ApiClients["tdns-auth"] = &tdns.ApiClient{
-		Name: "tdns-auth", Client: srv.Client(), BaseUrl: srv.URL + "/api/v1", AuthMethod: "none",
+	tdns.Globals.ApiClients["auth"] = &tdns.ApiClient{
+		Name: "auth", Client: srv.Client(), BaseUrl: srv.URL + "/api/v1",
 	}
 	savedZone := tdns.Globals.Zonename
 	tdns.Globals.Zonename = "parent.example."
 	t.Cleanup(func() {
 		tdns.Globals.Zonename = savedZone
 		if had {
-			tdns.Globals.ApiClients["tdns-auth"] = saved
+			tdns.Globals.ApiClients["auth"] = saved
 		} else {
-			delete(tdns.Globals.ApiClients, "tdns-auth")
+			delete(tdns.Globals.ApiClients, "auth")
 		}
 	})
 	return &outfiles

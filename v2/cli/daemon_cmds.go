@@ -305,7 +305,7 @@ Right now this doesn't do much, but later on various services will be able to re
 			// Get command from CLI config if available
 			clientKey := getClientKeyFromParent(role)
 			if clientKey == "" {
-				clientKey = "tdns-auth" // fallback for unknown roles
+				clientKey = "auth" // fallback for unknown roles
 			}
 			daemonCommand := ""
 			ad := getApiDetailsByClientKey(clientKey)
@@ -351,7 +351,7 @@ Right now this doesn't do much, but later on various services will be able to re
 
 			clientKey := getClientKeyFromParent(role)
 			if clientKey == "" {
-				clientKey = "tdns-auth" // fallback for unknown roles
+				clientKey = "auth" // fallback for unknown roles
 			}
 			ad := getApiDetailsByClientKey(clientKey)
 

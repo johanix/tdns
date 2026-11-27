@@ -304,7 +304,7 @@ func socketClientOf(info *DaemonApi) (*tdns.ApiClient, error) {
 		return nil, fmt.Errorf("%s serves no local admin socket\n(%s), which this command needs", info.ConfigFile, why)
 	}
 	return tdns.NewClientWithOptions(info.Role, "unix://"+info.Socket,
-		tdns.ClientOptions{AuthMethod: "none", ExpectConfigFile: info.ConfigFile}), nil
+		tdns.ClientOptions{ExpectConfigFile: info.ConfigFile}), nil
 }
 
 // entryIsDaemonSocket says whether entry e is the local socket of the daemon
@@ -378,6 +378,18 @@ func accessAtDaemon(role, daemonCfg string, post tdns.AccessPost) (tdns.AccessRe
 	return accessOver(c, post)
 }
 
+// thisCommandLine is the command line this run was given, as one shell
+// line: the program by its name, each argument quoted where it must be. A
+// refusal that is fixed outside the command (an access file to create)
+// gives it to run again as it was.
+func thisCommandLine() string {
+	words := []string{filepath.Base(os.Args[0])}
+	for _, a := range os.Args[1:] {
+		words = append(words, shellQuote(a))
+	}
+	return strings.Join(words, " ")
+}
+
 // accessTimeout bounds one /access request, answer included: the daemon
 // answers from memory, after at most one small file write.
 var accessTimeout = 30 * time.Second
@@ -410,12 +422,15 @@ func accessOver(c *tdns.ApiClient, post tdns.AccessPost) (tdns.AccessResponse, e
 }
 
 // runAccess sends post to role's daemon and prints its verdict, in its own
-// words. A refusal is the error.
+// words. A refusal is the error. One for want of an access file ends with
+// this very command, to run again once the file is there.
 func runAccess(role, daemonCfg string, post tdns.AccessPost) error {
 	resp, err := accessAtDaemon(role, daemonCfg, post)
 	switch {
 	case err != nil:
 		return err
+	case resp.Error && resp.Missing:
+		return fmt.Errorf("%s\nthen run this again:\n%s", resp.ErrorMsg, commandLines(thisCommandLine(), 3))
 	case resp.Error:
 		return errors.New(resp.ErrorMsg)
 	}
@@ -431,12 +446,14 @@ func runAccess(role, daemonCfg string, post tdns.AccessPost) error {
 }
 
 // printAccessList prints what the daemon runs: the verdict, the access file,
-// keyauth, the clients, and the pins of the certificate its TCP API serves.
+// the clients, and the pins of the certificate its TCP API serves.
 func printAccessList(resp tdns.AccessResponse) {
 	fmt.Println(resp.Msg)
-	if resp.File != "" {
+	if resp.File != "" && !resp.Missing {
 		fmt.Printf("\nAccess file: %s\n", resp.File)
-		fmt.Printf("keyauth: %s\n\n", map[bool]string{true: "on", false: "off"}[resp.KeyAuth])
+		if len(resp.Clients) > 0 {
+			fmt.Println()
+		}
 		for _, c := range resp.Clients {
 			state, note := "", ""
 			if c.Disabled {
@@ -466,12 +483,15 @@ func NewClientCmd(role string) *cobra.Command {
 		Use:   "client",
 		Short: fmt.Sprintf("Manage who may use %s's management API over the network (its access file)", role),
 		Long: fmt.Sprintf(`Manage %s's access file: the network clients, by the pin of their
-certificate, with their roles, and whether the API key still works.
+certificate, with their roles.
 
-The daemon writes the file. Each command goes to the running daemon over
-its local admin socket, so run them as root on the daemon's host. The
-daemon checks every change with its validator, writes it atomically (the
-previous file is kept as .prev) and puts it in force at once.
+The file is <config dir>/<config name>-access.yaml, or apiserver.access-file.
+You create it (touch is enough): without it the daemon takes no remote
+clients, and it never creates it. The daemon writes what is in it. Each
+command goes to the running daemon over its local admin socket, so run
+them as root on the daemon's host. The daemon checks every change with
+its validator, writes it atomically (the previous file is kept as .prev)
+and puts it in force at once.
 
 Roles are read-only and read-write. Admin is the local socket's alone.`, role),
 	}
@@ -506,10 +526,10 @@ Roles are read-only and read-write. Admin is the local socket's alone.`, role),
 					fatalf("%s %v", certFile, err)
 				}
 			case p == "":
-				fatalf("give the client's pin (--pin) or its certificate (--cert); never its key")
+				fatalf("give the client's pin (--pin) or its certificate (--cert),\nnever its private key. Its pin is what\n   tdns-ncli client init\nprints on the client's host")
 			}
 			if roleName == "" {
-				fatalf("--role read-only|read-write is required")
+				fatalf("--role read-only|read-write is required:\n%s", commandLines(thisCommandLine()+" --role read-write", 3))
 			}
 			if err := tdns.CheckAccessClientName(args[0]); err != nil {
 				fatalf("%v", err)
@@ -542,19 +562,6 @@ Roles are read-only and read-write. Admin is the local socket's alone.`, role),
 		},
 	}
 
-	keyauth := &cobra.Command{
-		Use:   "keyauth on|off",
-		Short: "Accept the API key on the TCP API (read-write), or not",
-		Long: `keyauth off stops the API key working on the TCP API: clients then need a
-certificate. It cannot lock anyone out, because the local socket does not
-depend on it. keyauth on brings the key back.`,
-		Args:      cobra.ExactArgs(1),
-		ValidArgs: []string{"on", "off"},
-		Run: func(cmd *cobra.Command, args []string) {
-			send(tdns.AccessPost{Command: "keyauth", KeyAuth: args[0]})
-		},
-	}
-
 	list := &cobra.Command{
 		Use:   "list",
 		Short: "List the clients the daemon runs, and the pins of its TCP API certificate",
@@ -569,6 +576,6 @@ depend on it. keyauth on brings the key back.`,
 	c.AddCommand(add,
 		setDisabled("disable", "Refuse a client, keeping its entry"),
 		setDisabled("enable", "Accept a disabled client again"),
-		setRole, keyauth, list)
+		setRole, list)
 	return c
 }

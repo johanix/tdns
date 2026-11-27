@@ -8,9 +8,11 @@ listeners:
 
 apiserver:
    addresses:  [ 127.0.0.1:8400 ]
-   apikey:     ixfrtest-secret
    certfile:   /etc/tdns/certs/api.crt
    keyfile:    /etc/tdns/certs/api.key
+   # One socket for every config the rig derives from this one, so that
+   # tdns-cli.yaml's socket entry reaches whichever runs (as root).
+   socket:     /var/run/tdns/ixfrtest.sock
 
 db:
    file:  /var/tmp/ixfrtest/tdns.db

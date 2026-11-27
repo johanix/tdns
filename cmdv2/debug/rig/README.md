@@ -70,7 +70,8 @@ SRC=/path/to/a/built/tdns/worktree /var/tmp/ixfrtest/run-ixfr-tests.sh
 `SRC` must name a worktree whose `cmdv2/auth` and `cmdv2/cli` have been built
 with `make` — the rig runs those binaries, not anything on `$PATH`. It also
 expects `dig` and `named` from pkgsrc (`/usr/pkg/{bin,sbin}`) and the API
-certificate named in `tdns-auth.yaml`.
+certificate named in `tdns-auth.yaml`. Run it as root: `tdns-cli.yaml`
+reaches the daemon over its local admin socket, which is root's.
 
 `reseed.sh` puts the working directory back to a clean start: the zone seed
 below, no database, no journal, no secondary state. Run it as a **file**, never

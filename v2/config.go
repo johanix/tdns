@@ -51,8 +51,8 @@ func (s SensitiveString) String() string {
 
 // MarshalJSON writes the redacted form too. encoding/json does not call
 // String(), so without this a struct holding a SensitiveString carried the
-// secret in clear whenever it was sent as JSON: `config status` returned
-// apiserver.apikey to every caller.
+// secret in clear whenever it was sent as JSON: `config status` once
+// returned the API key of the time to every caller.
 //
 // Nothing reads a secret back out of JSON. The daemon's config is decoded from
 // YAML through mapstructure, which this does not touch, and the CLI learns
@@ -471,11 +471,10 @@ func ValidateTransferSrc(where string, srcs []string) error {
 type ApiServerConf struct {
 	// Addresses must be in addr:port format. They may be left out when
 	// Socket is set: the local admin socket is served without them (see
-	// APIdispatcher), so a socket-only daemon is a valid config. It still
-	// needs ApiKey (the router builders refuse to start without one), but
-	// not CertFile and KeyFile, which only the TCP listeners use.
-	Addresses []string        `validate:"required_without=Socket"`
-	ApiKey    SensitiveString `validate:"required"`
+	// APIdispatcher), so a socket-only daemon is a valid config. The TCP API
+	// is TLS 1.3, and its clients authenticate with a certificate whose pin
+	// is in the access file (AccessFile). There is no API key.
+	Addresses []string `validate:"required_without=Socket"`
 	// CertFile and KeyFile, when neither is set, are the config file's
 	// default pair, {confdir}/certs/{config name}-api.crt and .key, which
 	// the daemon writes, self-signed, at its first start (applyCertDefaults).
@@ -485,7 +484,6 @@ type ApiServerConf struct {
 	// the daemon's first start), or could not be written. Not a config key.
 	CertPending bool `yaml:"-" mapstructure:"-" json:"-"`
 
-	UseTLS bool
 	Server ApiServerAppConf
 	Agent  ApiServerAppConf
 	// MSA       ApiServerAppConf
@@ -495,19 +493,22 @@ type ApiServerConf struct {
 	// "none" there means no socket; unset, it is named after the config file
 	// path (/etc/tdns/tdns-auth.yaml serves /var/run/tdns/etc_tdns_tdns-auth.yaml.sock), which
 	// ParseConfig fills in (ApiSocketPath). After the load "" means no socket.
-	// The management API is served there as well as on Addresses,
-	// with no TLS and no API key: whoever can open the socket is admin, so
-	// file permissions are the authentication. The daemon creates the socket
-	// with mode 0600 and refuses a directory that group or others can enter.
-	// See api_socket.go and docs/2026-11-20-api-pinning-mtls-roles-design.md.
+	// The management API is served there as well as on Addresses, with no
+	// TLS: whoever can open the socket is admin, so file permissions are the
+	// authentication. The daemon creates the socket with mode 0600 and
+	// refuses a directory that group or others can enter. See api_socket.go
+	// and docs/2026-11-20-api-pinning-mtls-roles-design.md.
 	Socket string
 
-	// AccessFile is the network API's access policy (apiserver.access-file):
-	// the clients, by certificate pin, with their roles, and whether the API
-	// key still works. Unset, the network API works as before: the API key,
-	// as admin. Set, it requires Socket, because admin then exists only there.
-	// The file is read by its own loader (api_access.go), not decoded with
-	// this config, and the daemon writes it when tdns-ncli asks (/access).
+	// AccessFile is the network API's access policy: the clients, by
+	// certificate pin, with their roles. It is always on: unset in the
+	// config, it is <config dir>/<config name>-access.yaml (ApiAccessFilePath,
+	// which ParseConfig applies), and apiserver.access-file only moves it.
+	// A file that is not there means no remote clients: the TCP API refuses
+	// every request, and the local socket is the only way in. The operator
+	// creates the file (touch is enough); the daemon then writes what is in
+	// it when tdns-ncli asks (/access), and never creates it. It is read by
+	// its own loader (api_access.go), not decoded with this config.
 	AccessFile string `yaml:"access-file" mapstructure:"access-file"`
 
 	// AppClients names the access-file clients that are application
@@ -522,7 +523,6 @@ type ApiServerConf struct {
 
 type ApiServerAppConf struct {
 	Addresses []string
-	ApiKey    SensitiveString
 }
 
 type DbConf struct {

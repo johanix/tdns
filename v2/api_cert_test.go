@@ -117,11 +117,11 @@ func TestPendingCertValidates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending := ApiServerConf{Addresses: []string{"127.0.0.1:8989"}, ApiKey: "k", CertPending: true}
+	pending := ApiServerConf{Addresses: []string{"127.0.0.1:8989"}, CertPending: true}
 	if err := v.Struct(pending); err != nil {
 		t.Errorf("pending: %v", err)
 	}
-	missing := ApiServerConf{Addresses: []string{"127.0.0.1:8989"}, ApiKey: "k"}
+	missing := ApiServerConf{Addresses: []string{"127.0.0.1:8989"}}
 	if err := v.Struct(missing); err == nil {
 		t.Error("no certfile, not pending: validated")
 	}
@@ -206,7 +206,7 @@ func TestConfigStatusReportsListenersNotStartedForWantOfACert(t *testing.T) {
 	e := newAuthEnv(t, "-", nil)
 	addrs := []string{freeTCPAddr(t), freeTCPAddr(t)}
 	dc := &Config{}
-	dc.ApiServer = ApiServerConf{Addresses: addrs, ApiKey: "k", UseTLS: true, CertPending: true}
+	dc.ApiServer = ApiServerConf{Addresses: addrs, CertPending: true}
 	dc.Internal.CfgFile = filepath.Join(t.TempDir(), "tdns-auth.yaml")
 	dc.Internal.ServerErrors = NewServerErrorRegistry()
 	done := make(chan struct{})
@@ -228,7 +228,7 @@ func TestConfigStatusReportsListenersNotStartedForWantOfACert(t *testing.T) {
 	if !slices.Equal(cr.ApiTCPNotStarted, addrs) || cr.ApiTCPNoCert != cert {
 		t.Errorf("status: not started %v for want of %q; want %v and %s", cr.ApiTCPNotStarted, cr.ApiTCPNoCert, addrs, cert)
 	}
-	if len(cr.ApiTCPStopped) != 0 || len(cr.ApiTCPListening) != 0 || len(cr.ApiTCPFailed) != 0 {
-		t.Errorf("status: stopped %v, listening %v, failed %+v; want none (nothing was started)", cr.ApiTCPStopped, cr.ApiTCPListening, cr.ApiTCPFailed)
+	if len(cr.ApiTCPListening) != 0 || len(cr.ApiTCPFailed) != 0 {
+		t.Errorf("status: listening %v, failed %+v; want none (nothing was started)", cr.ApiTCPListening, cr.ApiTCPFailed)
 	}
 }

@@ -85,7 +85,14 @@ func wireInstances() {
 	rootCmd.InitDefaultCompletionCmd()
 
 	cfgPath := cli.ConfigPathFromArgs(os.Args[1:])
-	for _, w := range cli.WireInstanceTrees(rootCmd, cli.EarlyApiServers(cfgPath)) {
+	warnings := cli.WireInstanceTrees(rootCmd, cli.EarlyApiServers(cfgPath))
+	// The CLI config commands (config add|update|list|check) report on the
+	// entries themselves, each problem once: the wiring's warnings would say
+	// it twice.
+	if c, _, err := rootCmd.Find(os.Args[1:]); err == nil && cli.IsCliConfigCmd(c) {
+		return
+	}
+	for _, w := range warnings {
 		fmt.Fprintf(os.Stderr, "tdns-ncli: %s\n", w)
 	}
 }
@@ -154,9 +161,9 @@ func init() {
 	// understands the role: key. Set before anything reads the default (the
 	// flag help below, ConfigPathFromArgs, initConfig).
 	cli.DefaultCliConfigFile = tdns.DefaultNcliCfgFile
-	// An https entry must verify the daemon (pins, a rootca, or rootca:
-	// insecure said out loud); tdns-cli keeps its old default of not checking.
-	cli.RequireServerVerification = true
+	// One "Error:" per error: cobra would print a command's error itself,
+	// and cobra.CheckErr in Execute prints it again.
+	rootCmd.SilenceErrors = true
 
 	// Config/API init moved to rootCmd.PersistentPreRun (skipped for root-level "keys")
 
@@ -164,7 +171,7 @@ func init() {
 	// auth-daemon concern (RFC 9432 catalog zones served by tdns-auth).
 	cli.AuthCmd.AddCommand(cli.CatalogCmd)
 
-	// "config add|update|list": maintain the CLI config's apiservers:
+	// "config add|update|list|check": maintain the CLI config's apiservers:
 	// list. Attached here, before wireInstances runs, so an instance named
 	// "config" is refused as the collision it is.
 	rootCmd.AddCommand(cli.NewCliConfigCmd())

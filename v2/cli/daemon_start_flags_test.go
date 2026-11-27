@@ -57,12 +57,12 @@ func TestDaemonStartFlagsCarryTheInstanceConfig(t *testing.T) {
 	// included.
 	root, start = newTree()
 	root.PersistentFlags().Set("config", "/tmp/explicit.yaml")
-	if got, want := flags(start, &ApiDetails{Name: "tdns-imr"}), []string{"--config", "/tmp/explicit.yaml"}; !reflect.DeepEqual(got, want) {
+	if got, want := flags(start, &ApiDetails{Name: "imr"}), []string{"--config", "/tmp/explicit.yaml"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("entry with no config-file: and --config: %q, want %q", got, want)
 	}
 
 	_, start = newTree()
-	if got := flags(start, &ApiDetails{Name: "tdns-imr"}); len(got) != 0 {
+	if got := flags(start, &ApiDetails{Name: "imr"}); len(got) != 0 {
 		t.Errorf("entry with no config-file: %q, want none", got)
 	}
 	if got := flags(start, nil); len(got) != 0 {
@@ -84,9 +84,9 @@ func TestDaemonStartFlagsCarryTheInstanceConfig(t *testing.T) {
 	}
 }
 
-// What `imr2 config mwe` tells the operator: an entry whose config-file: is
-// the file it wrote and the start command uses (the .mwe when the config was
-// already there), and a check through imr2's own entry.
+// What `imr2 config mwe` tells the operator: config add for the file it
+// wrote and the start command uses (the .mwe when the config was already
+// there), its access file to create, and a check through imr2's own entry.
 func TestImrConfigMweOutputForAnInstance(t *testing.T) {
 	dir := t.TempDir()
 	cfg := filepath.Join(dir, "tdns-imr2.yaml")
@@ -97,8 +97,11 @@ func TestImrConfigMweOutputForAnInstance(t *testing.T) {
 	out := captureStdout(t, func() { runImrConfigMwe("imr2", cfg) })
 
 	mwe := cfg + ".mwe"
-	if !strings.Contains(out, "config-file: "+mwe+"\n") {
-		t.Errorf("the entry's config-file: is not the written %s:\n%s", mwe, out)
+	if !strings.Contains(unwrapCommands(out), "tdns-ncli config add --name imr2 "+mwe+"\n") {
+		t.Errorf("config add does not name imr2 and the written %s:\n%s", mwe, out)
+	}
+	if !strings.Contains(out, "touch "+filepath.Join(dir, "tdns-imr2.yaml-access.yaml")+"\n") {
+		t.Errorf("no touch line for the access file:\n%s", out)
 	}
 	if !strings.Contains(out, "tdns-imr --config "+mwe) {
 		t.Errorf("the start command does not use %s:\n%s", mwe, out)

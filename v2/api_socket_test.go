@@ -130,7 +130,6 @@ func TestMainLoopRemovesTheAdminSocket(t *testing.T) {
 			dir := shortTempDir(t)
 			sock := filepath.Join(dir, "admin.sock")
 			conf := &Config{}
-			conf.ApiServer.ApiKey = "the-api-key"
 			conf.ApiServer.Socket = sock
 			conf.Internal.ServerErrors = NewServerErrorRegistry()
 			conf.Internal.APIStopCh = make(chan struct{})
@@ -216,11 +215,11 @@ func TestApiSocketServeFailureIsReported(t *testing.T) {
 	}
 }
 
-// The socket serves the same router with no key; the same router over TCP
-// still wants one. A client made from a unix:/// base URL reaches it.
-func TestApiSocketServesWithoutKey(t *testing.T) {
+// The socket serves the router with no credential; the same router over TCP
+// wants a client certificate. A client made from a unix:/// base URL reaches
+// it.
+func TestApiSocketServesWithoutCredentials(t *testing.T) {
 	conf := &Config{}
-	conf.ApiServer.ApiKey = "the-api-key"
 	rtr, err := conf.SetupSimpleAPIRouter(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -236,24 +235,24 @@ func TestApiSocketServesWithoutKey(t *testing.T) {
 		t.Errorf("socket file: %v, mode %v", err, fi.Mode().Perm())
 	}
 
-	api := NewClient("local", "unix://"+sock, "", "none", "")
+	api := NewClientWithOptions("local", "unix://"+sock, ClientOptions{})
 	if api.Socket != sock {
 		t.Errorf("client socket = %q", api.Socket)
 	}
 
 	// A unix:// URL with a relative path is still a socket URL: it fails,
 	// saying why, and is not sent on as an ordinary URL.
-	rel := NewClient("local", "unix://admin.sock", "", "none", "")
+	rel := NewClientWithOptions("local", "unix://admin.sock", ClientOptions{})
 	if _, _, err := rel.Post("/ping", []byte(`{}`)); err == nil || !strings.Contains(err.Error(), "unix:///absolute/path") {
 		t.Errorf("relative socket URL: err = %v, want one naming the unix:///absolute/path form", err)
 	}
 	status, body, err := api.Post("/ping", []byte(`{"Msg":"hello"}`))
 	if err != nil || status != http.StatusOK {
-		t.Fatalf("ping over the socket, no key: status %d, err %v, body %s", status, err, body)
+		t.Fatalf("ping over the socket, no credential: status %d, err %v, body %s", status, err, body)
 	}
 
-	// Over TCP the same router refuses a request without the key, and no
-	// header can make a TCP request look like a socket one.
+	// Over TCP the same router refuses a request without a certificate,
+	// and no header can make a TCP request look like a socket one.
 	srv := httptest.NewServer(rtr)
 	defer srv.Close()
 	for _, hdr := range []map[string]string{nil, {"X-Local-Socket": "true"}} {
@@ -267,7 +266,7 @@ func TestApiSocketServesWithoutKey(t *testing.T) {
 		}
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusForbidden {
-			t.Errorf("TCP without a key (%v): status %d, want 403", hdr, resp.StatusCode)
+			t.Errorf("TCP without a certificate (%v): status %d, want 403", hdr, resp.StatusCode)
 		}
 	}
 }
@@ -292,7 +291,6 @@ func TestUnixSocketPath(t *testing.T) {
 func TestAPIdispatcherServesTheSocket(t *testing.T) {
 	newConf := func(sock string) *Config {
 		conf := &Config{}
-		conf.ApiServer.ApiKey = "the-api-key"
 		conf.ApiServer.Socket = sock
 		conf.Internal.ServerErrors = NewServerErrorRegistry()
 		return conf
@@ -310,18 +308,9 @@ func TestAPIdispatcherServesTheSocket(t *testing.T) {
 	if err := APIdispatcher(conf, rtr, done); err != nil {
 		t.Fatal(err)
 	}
-	status, body, err := NewClient("local", "unix://"+sock, "", "none", "").Post("/ping", []byte(`{}`))
+	status, body, err := NewClientWithOptions("local", "unix://"+sock, ClientOptions{}).Post("/ping", []byte(`{}`))
 	if err != nil || status != http.StatusOK {
 		t.Fatalf("ping over the socket with no TCP addresses: status %d, err %v, body %s", status, err, body)
-	}
-	// An entry that says X-API-Key but has no key still works on the socket:
-	// a socket client sends no key and asks for none.
-	keyless := NewClient("local", "unix://"+sock, "", "X-API-Key", "")
-	if keyless.AuthMethod != "none" || keyless.apiKey != "" {
-		t.Errorf("socket client: authmethod %q, key set %v; want none and no key", keyless.AuthMethod, keyless.apiKey != "")
-	}
-	if status, body, err := keyless.Post("/ping", []byte(`{}`)); err != nil || status != http.StatusOK {
-		t.Errorf("ping over the socket from an X-API-Key entry with no key: status %d, err %v, body %s", status, err, body)
 	}
 	if n := len(conf.Internal.ServerErrors.List()); n != 0 {
 		t.Errorf("%d server errors, want none: %v", n, conf.Internal.ServerErrors.List())

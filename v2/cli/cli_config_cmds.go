@@ -62,7 +62,7 @@ func NoCliConfigNeeded(cmd *cobra.Command, cliConfig string) bool {
 	return errors.Is(err, os.ErrNotExist)
 }
 
-// NewCliConfigCmd builds `config`, with `add`, `update` and `list`.
+// NewCliConfigCmd builds `config`, with `add`, `update`, `list` and `check`.
 //
 // Not to be confused with `<daemon> config check`, which checks a DAEMON's
 // config. This is about the CLI's own: which daemons it addresses.
@@ -76,7 +76,7 @@ func NewCliConfigCmd() *cobra.Command {
 This is not "<daemon> config check", which checks a daemon's config.`,
 		Annotations: map[string]string{cliConfigAnnotation: "1"},
 	}
-	c.AddCommand(newConfigAddCmd(), newConfigUpdateCmd(), newConfigListCmd())
+	c.AddCommand(newConfigAddCmd(), newConfigUpdateCmd(), newConfigListCmd(), newConfigCheckCliCmd())
 	return c
 }
 
@@ -109,17 +109,19 @@ the daemon's host: it asks the daemon over its local admin socket.
 
 The daemon type comes from service.name (or, for tdns-imr, from having an
 imrengine: block and no service: block), and failing that from the file
-name; --role overrides it. The first daemon of a type is added under its
-canonical name (tdns-auth, tdns-agent, tdns-imr) and is reached as "auth",
-"agent", "imr". Any further one becomes an instance with role: set, named
-after the file (tdns-auth2.yaml -> auth2) unless --name says otherwise,
-reached as "tdns-ncli auth2 ...".
+name; --role overrides it. An entry's name is the command word that
+reaches it. The first daemon of a type is named after the type ("auth",
+"agent", "imr": tdns-ncli auth ...). Any further one is named after the
+file (tdns-auth2.yaml -> auth2) unless --name says otherwise, reached as
+"tdns-ncli auth2 ...".
 
-A running daemon: your client certificate is made if you have none (as
-client init does), the daemon adds its pin to its access file as
---client-name (read-write), and one request over TCP checks it. Only then
-is the entry written: the TCP address, the pins of the daemon's
-certificate, authmethod: certificate and config-file:. No API key.
+A running daemon takes remote clients once its access file is there:
+<config dir>/<config name>-access.yaml, or apiserver.access-file. The
+daemon never creates it; if it is missing, config add says how (touch).
+Your client certificate is made if you have none (as client init does),
+the daemon adds its pin to its access file as --client-name (read-write),
+and one request over TCP checks it. Only then is the entry written: the
+TCP address, the pins of the daemon's certificate and config-file:.
 
 A stopped daemon, or one with no TCP address, gets an entry with
 config-file: only, through which root reaches its local admin socket.
@@ -181,8 +183,8 @@ type AddOptions struct {
 type AddResult struct {
 	// Entry is the entry added (or that would be).
 	Entry ApiDetails
-	// Canonical: Entry is the canonical entry of a built-in role, not an
-	// instance.
+	// Canonical: Entry is a built-in role's entry (named after the role),
+	// not an instance.
 	Canonical bool
 	// AlreadyKnown is the name of the existing entry for this daemon; when set
 	// nothing was added.
@@ -204,11 +206,14 @@ type AddResult struct {
 	Wrote bool
 	// Notes are things the operator should know.
 	Notes []string
+	// AccessMissing is the access file of a stopped daemon that is not
+	// there: config update --cert needs it.
+	AccessMissing string
 }
 
 var addableRoles = map[string]bool{"auth": true, "agent": true, "imr": true}
 
-const newCliConfigHeader = "# tdns-ncli configuration.\n# apiservers: lists the daemons (and instances of a daemon) tdns-ncli addresses;\n# `tdns-ncli config add <daemon-config.yaml>` adds to it. config add\n# writes no API key, but an entry added by hand may hold one: keep it 0600.\n\n"
+const newCliConfigHeader = "# tdns-ncli configuration.\n# apiservers: lists the daemons (and instances of a daemon) tdns-ncli addresses;\n# `tdns-ncli config add <daemon-config.yaml>` adds to it. An entry's name is\n# the command word that reaches it.\n\n"
 
 // AddDaemonConfig adds one apiservers: entry for the daemon whose config is
 // o.DaemonConfig to the CLI config (design 2026-11-25 section 4). A running
@@ -248,7 +253,7 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 	// The entry for this daemon, if there is one, and the new one's name,
 	// from what is in the CLI config: before the daemon is asked anything,
 	// and again under the lock before the write.
-	entry := ApiDetails{AuthMethod: "none", ConfigFile: info.ConfigFile}
+	entry := ApiDetails{ConfigFile: info.ConfigFile}
 	nNotes := len(res.Notes)
 	plan := func() (existing []ApiDetails, known bool, err error) {
 		existing, missing, err := cliEntries(o.CliConfig)
@@ -268,11 +273,6 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 	if err != nil || known {
 		return res, err
 	}
-	// A TCP API without TLS takes no client certificate, running or not:
-	// refused here, not a config-file:-only entry that names --cert.
-	if tcpURL != "" && !info.UseTLS {
-		return nil, fmt.Errorf("%s: apiserver.usetls is false, but a client\ncertificate needs TLS on the TCP API; set usetls: true", info.ConfigFile)
-	}
 
 	// Running? Its socket answers /access list, naming its config.
 	// Stopped: the config-file:-only entry.
@@ -283,10 +283,15 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 	res.Running = running
 	cert := res.Running && tcpURL != ""
 	if cert {
-		if err := daemonReady(info, list, tcpURL, true); err != nil {
+		if err := daemonReady(info, list, tcpURL, true, retryAdd(o, o.ClientName)); err != nil {
 			return nil, err
 		}
-		entry.BaseURL, entry.AuthMethod, entry.TLSAuth, entry.Pins = tcpURL, "certificate", "pin", list.ServerPins
+		entry.BaseURL, entry.Pins = tcpURL, list.ServerPins
+	}
+	if !res.Running && tcpURL != "" {
+		if _, err := os.Stat(info.AccessFile); errors.Is(err, fs.ErrNotExist) {
+			res.AccessMissing = info.AccessFile
+		}
 	}
 	// The pair is the one the CLI config will name once written: a
 	// cli.localconfig with its own client: block counts, also when the
@@ -354,7 +359,7 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 	}
 	res.Entry, res.File = entry, target
 	if !res.Running && tcpURL != "" {
-		res.Update = fmt.Sprintf("%s config update %s --cert", ncliFor(o.CliConfig), entry.Name)
+		res.Update = fmt.Sprintf("%s config update %s --cert", ncliFor(o.CliConfig), shellQuote(entry.Name))
 	}
 	if o.DryRun {
 		return res, nil
@@ -366,31 +371,21 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 	return res, nil
 }
 
-// chooseEntryName fills in entry.Name (and Role for an instance).
+// chooseEntryName fills in entry.Name and entry.Role. The first daemon of
+// a role is named after the role (its clientKey: auth); any further one
+// after its config file, or --name.
 func chooseEntryName(entry *ApiDetails, res *AddResult, role string, existing []ApiDetails, o AddOptions) error {
-	canonical := roleToClientKey[role] // tdns-auth, tdns-agent, tdns-imr
-	// Only a role-less row is the canonical entry. A row named tdns-auth
-	// that carries a role: is an instance using a reserved name, which the
-	// CLI ignores (checkInstanceEntries): counting it would file the first
-	// real auth daemon as an extra instance, and leave `tdns-ncli auth` with
-	// no client.
-	hasCanonical, badRole := false, ""
+	roleName := roleToClientKey[role] // auth, agent, imr
+	if roleName == "" {
+		roleName = role
+	}
 	used := map[string]bool{}
+	oldHolder := "" // an entry with the old name of this role's entry
 	for _, e := range existing {
 		used[e.Name] = true
-		if e.Name == canonical {
-			if e.Role == "" {
-				hasCanonical = true
-			} else {
-				badRole = e.Role
-			}
+		if renamedTo(e) == roleName {
+			oldHolder = e.Name
 		}
-	}
-	// That row also holds the name this daemon would take as the canonical
-	// one: say so, rather than write an entry the CLI would ignore too.
-	badCanonical := func() error {
-		return fmt.Errorf("the CLI config has an entry named %q with role: %s, which the CLI ignores: %q is the canonical %s's name. Remove its role: line to make it the canonical %s, or rename it, then add again",
-			canonical, badRole, canonical, role, role)
 	}
 	taken := func(n string) bool {
 		if used[n] || n == ShowCmdsName || n == "help" || n == "completion" {
@@ -404,33 +399,42 @@ func chooseEntryName(entry *ApiDetails, res *AddResult, role string, existing []
 				return true
 			}
 		}
+		if _, old := oldEntryNames[n]; old {
+			return true
+		}
 		return o.CommandWordTaken != nil && o.CommandWordTaken(n)
 	}
 
-	asCanonical := func() {
-		entry.Name = canonical
+	// An entry with the old name holds this role's entry until it is
+	// renamed: a second one for it would be one daemon too many.
+	oldNameRefusal := func() error {
+		return fmt.Errorf("the CLI config has an entry with the old name %q:\nrename it first, then run this again:\n%s",
+			oldHolder, commandLines(ncliFor(o.CliConfig)+" config update "+shellQuote(oldHolder)+" --rename "+shellQuote(roleName), 3))
+	}
+	asRoleEntry := func() {
+		entry.Name, entry.Role = roleName, role
 		res.Canonical = true
 		res.Notes = append(res.Notes, fmt.Sprintf(
-			"there was no %s entry yet, so this daemon is the canonical one (tdns-ncli %s ...); --name adds it as an extra instance instead",
-			canonical, role))
+			"there was no %s entry yet, so this daemon is it (tdns-ncli %s ...); --name adds it as an extra instance instead",
+			roleName, roleName))
 	}
 	asInstance := func(name string) error {
 		if _, ok := knownInstanceRoles[role]; !ok {
 			return fmt.Errorf("a %s entry already exists, and tdns-ncli has no command tree for a second %s instance yet (it has one for: %s)",
-				canonical, role, knownRoleList())
+				roleName, role, knownRoleList())
 		}
 		entry.Name, entry.Role = name, role
 		return nil
 	}
 
 	switch {
-	case o.Name == "" && !hasCanonical && badRole != "":
-		return badCanonical()
-	case o.Name == "" && !hasCanonical:
-		asCanonical()
+	case (o.Name == "" || o.Name == roleName) && !used[roleName] && oldHolder != "":
+		return oldNameRefusal()
+	case o.Name == "" && !used[roleName]:
+		asRoleEntry()
 	case o.Name == "":
 		base := deriveInstanceName(o.DaemonConfig)
-		if base == "" {
+		if base == "" || base == roleName {
 			base = role
 		}
 		name := freeName(base, taken)
@@ -448,11 +452,8 @@ func chooseEntryName(entry *ApiDetails, res *AddResult, role string, existing []
 		if !validInstanceName(o.Name) {
 			return fmt.Errorf("--name %q is not usable: lower-case letters, digits and hyphens, starting with a letter, at most 32 characters", o.Name)
 		}
-		if o.Name == canonical && !hasCanonical {
-			if badRole != "" {
-				return badCanonical()
-			}
-			asCanonical()
+		if o.Name == roleName && !used[roleName] {
+			asRoleEntry()
 			return nil
 		}
 		if taken(o.Name) {
@@ -493,7 +494,7 @@ func knownEntry(o AddOptions, res *AddResult, existing []ApiDetails, info *Daemo
 	// first, which a new entry uses.
 	addrs := map[string]bool{}
 	for _, a := range info.Addresses {
-		if u, err := apiBaseURL(a, info.UseTLS); err == nil {
+		if u, err := apiBaseURL(a); err == nil {
 			addrs[hostPort(u)] = true
 		}
 	}
@@ -519,17 +520,22 @@ func knownEntry(o AddOptions, res *AddResult, existing []ApiDetails, info *Daemo
 			continue
 		}
 		res.AlreadyKnown = e.Name
-		flag := "--cert" // from the key, or no address yet
+		flag := "--cert" // no pins, or no address yet
 		switch {
-		case noTCP && tcpURL == "":
+		case noTCP && tcpURL == "" && renamedTo(e) == "":
 			return true, nil // the socket is all there is
+		case noTCP && tcpURL == "":
+			flag = ""
 		case usesCert(e):
 			flag = "--repin"
 		}
-		if e.ConfigFile == "" {
+		if n := renamedTo(e); n != "" {
+			flag = strings.TrimSpace("--rename " + shellQuote(n) + " " + flag)
+		}
+		if e.ConfigFile == "" && flag != "" && !strings.HasPrefix(flag, "--rename") {
 			flag += " --daemon-config " + shellQuote(info.ConfigFile)
 		}
-		res.Update = fmt.Sprintf("%s config update %s %s", ncliFor(o.CliConfig), e.Name, flag)
+		res.Update = fmt.Sprintf("%s config update %s %s", ncliFor(o.CliConfig), shellQuote(e.Name), flag)
 		return true, nil
 	}
 	return false, nil
@@ -554,7 +560,7 @@ func daemonTCP(info *DaemonApi) (tcpURL string, notes []string, err error) {
 	if len(info.Addresses) == 0 {
 		return "", nil, nil
 	}
-	if tcpURL, err = apiBaseURL(info.Addresses[0], info.UseTLS); err != nil {
+	if tcpURL, err = apiBaseURL(info.Addresses[0]); err != nil {
 		return "", nil, fmt.Errorf("%s: %w", info.ConfigFile, err)
 	}
 	if len(info.Addresses) > 1 {
@@ -597,27 +603,65 @@ func askAccess(info *DaemonApi, cmd string) (sock *tdns.ApiClient, list tdns.Acc
 
 // daemonReady refuses a running daemon whose pins there is no taking: no
 // TCP API, or no certificate served on it. For a certificate (cert) also
-// one with no access file (the daemon's advice) or no TLS.
-func daemonReady(info *DaemonApi, list tdns.AccessResponse, tcpURL string, cert bool) error {
+// one with no access file: the refusal names the file, how to create it,
+// and retry, the command to run again then.
+func daemonReady(info *DaemonApi, list tdns.AccessResponse, tcpURL string, cert bool, retry string) error {
 	switch {
-	// A file the config names but that is not there yet is no refusal:
-	// the add creates it (the first enrolment).
-	case cert && list.File == "" && list.Configured == "":
-		return errors.New(list.Msg) // the daemon's advice: no access file
 	case tcpURL == "":
 		return fmt.Errorf("%s lists no apiserver.addresses: the\ndaemon has no TCP API to reach with pins", info.ConfigFile)
-	case cert && !info.UseTLS:
-		return fmt.Errorf("%s: apiserver.usetls is false, but a client\ncertificate needs TLS on the TCP API; set usetls: true", info.ConfigFile)
+	case cert && list.Missing:
+		path := list.File
+		if path == "" {
+			path = info.AccessFile
+		}
+		return accessFileMissing(path, "tdns-"+info.Role, retry)
 	case len(list.ServerPins) == 0:
 		return fmt.Errorf("the daemon serves no certificate on its TCP API (is it\nlistening on %s?), so there is nothing to pin", info.Addresses[0])
 	}
 	return nil
 }
 
-// usesCert says whether e reaches its daemon over https with the client
-// certificate: config update --repin changes it, --cert has done its work.
+// accessFileMissing is the refusal for a daemon without its access file:
+// the file, how to create it, and retry, the command to run again then.
+func accessFileMissing(path, daemon, retry string) error {
+	return fmt.Errorf("access file %s is missing, so\n%s takes no remote clients. Create it (empty is fine):\n   touch %s\nthen run this again:\n%s",
+		path, daemon, path, commandLines(retry, 3))
+}
+
+// commandLines is cmd as printed for the operator to run, indented by
+// indent: on one line when it fits in 72 columns, indent included; else
+// broken between flags, with a trailing backslash, so that it still runs as
+// pasted.
+func commandLines(cmd string, indent int) string {
+	pad := strings.Repeat(" ", indent)
+	if indent+len(cmd) <= 72 {
+		return pad + cmd
+	}
+	parts := strings.Split(cmd, " --")
+	// The first flag stays with the program: a line of the program's name
+	// alone says nothing.
+	if len(parts) > 1 {
+		parts = append([]string{parts[0] + " --" + parts[1]}, parts[2:]...)
+	}
+	lines := []string{pad + parts[0]}
+	cont := pad + "   "
+	for _, p := range parts[1:] {
+		w := "--" + p
+		last := &lines[len(lines)-1]
+		if len(*last)+1+len(w)+2 <= 72 {
+			*last += " " + w
+			continue
+		}
+		*last += " \\"
+		lines = append(lines, cont+w)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// usesCert says whether e reaches its daemon over https with pins: config
+// update --repin changes those.
 func usesCert(e ApiDetails) bool {
-	return e.AuthMethod == "certificate" && strings.HasPrefix(strings.ToLower(e.BaseURL), "https://")
+	return len(e.Pins) > 0 && strings.HasPrefix(strings.ToLower(e.BaseURL), "https://")
 }
 
 // enrolPlan is what enrol would do, for a dry run.
@@ -632,8 +676,8 @@ func enrolPlan(cc CliClientConf, client, url string) []string {
 		"check one request over TCP to " + url}
 }
 
-// retryAdd is o's config add, enrolling as client, as the command line to
-// run it again: a refusal after the enrolment gives it to copy.
+// retryAdd is o's config add, enrolling as client (if set), as the command
+// line to run it again: a refusal gives it to copy.
 func retryAdd(o AddOptions, client string) string {
 	c := ncliFor(o.CliConfig) + " config add"
 	if o.Role != "" {
@@ -645,7 +689,10 @@ func retryAdd(o AddOptions, client string) string {
 	if o.TargetFile != "" {
 		c += " --file " + shellQuote(o.TargetFile)
 	}
-	return c + " --client-name " + shellQuote(client) + " " + shellQuote(o.DaemonConfig)
+	if client != "" {
+		c += " --client-name " + shellQuote(client)
+	}
+	return c + " " + shellQuote(o.DaemonConfig)
 }
 
 // enrol is steps 1 to 3 of a running daemon's certificate entry: the
@@ -668,10 +715,10 @@ func enrol(sock *tdns.ApiClient, cc CliClientConf, client, cmd, retry string, en
 	switch {
 	case err != nil:
 		// The daemon may have added it and lost the answer.
-		return fmt.Errorf("%v\nNo answer that the daemon added your pin; nothing was\nwritten. Run it again, which reuses a pin added:\n  %s", err, retry)
+		return fmt.Errorf("%v\nNo answer that the daemon added your pin; nothing was\nwritten. Run it again, which reuses a pin added:\n%s", err, commandLines(retry, 3))
 	case ans.Error:
 		// A refusal, or a pin written to the access file but not loaded.
-		return fmt.Errorf("the daemon refused or did not load your pin; nothing was written:\n%s\nIf it says the file was written, fix that and run this again,\nwhich reuses the pin:\n  %s", ans.ErrorMsg, retry)
+		return fmt.Errorf("the daemon refused or did not load your pin; nothing was written:\n%s\nIf it says the file was written, fix that and run this again,\nwhich reuses the pin:\n%s", ans.ErrorMsg, commandLines(retry, 3))
 	}
 	said := "The daemon: " + strings.ReplaceAll(ans.Msg, "\n", "\n   ")
 	*steps = append(*steps, said)
@@ -682,7 +729,7 @@ func enrol(sock *tdns.ApiClient, cc CliClientConf, client, cmd, retry string, en
 	if err != nil {
 		// What the daemon said stays: a pin there already but disabled is
 		// refused over TCP, and only its answer says to enable it.
-		return fmt.Errorf("%s\nbut a request over TCP to\n%s failed: %v\nNothing was written. The pin stays enrolled: once that is\nfixed, run this again, which reuses it:\n  %s", said, entry.BaseURL, err, retry)
+		return fmt.Errorf("%s\nbut a request over TCP to\n%s failed: %v\nNothing was written. The pin stays enrolled: once that is\nfixed, run this again, which reuses it:\n%s", said, entry.BaseURL, err, commandLines(retry, 3))
 	}
 	*steps = append(*steps, ok)
 	return nil
@@ -698,16 +745,16 @@ func samePair(cfg, target string, out []byte, cc CliClientConf, client, cmd, ret
 	pc, err := prospectiveClientConf(cfg, target, out)
 	if err != nil {
 		// Not a pair that changed: say what failed.
-		return fmt.Errorf("cannot read the client pair of the config to be\nwritten (%v); nothing was written. The pin of %s\nstays enrolled as %s; run this again, which reuses it:\n  %s", err, was, client, retry)
+		return fmt.Errorf("cannot read the client pair of the config to be\nwritten (%v); nothing was written. The pin of %s\nstays enrolled as %s; run this again, which reuses it:\n%s", err, was, client, commandLines(retry, 3))
 	}
 	if now, key := clientCertPaths(pc); now != was || key != wasKey {
-		return fmt.Errorf("the client pair in %s changed while %s\nran (now %s); nothing was written. The pin of\n%s stays enrolled as %s: put that pair back and run\n  %s\nor run that with another --client-name", cfg, cmd, now, was, client, retry)
+		return fmt.Errorf("the client pair in %s changed while %s\nran (now %s); nothing was written. The pin of\n%s stays enrolled as %s: put that pair back and run\n%s\nor run that with another --client-name", cfg, cmd, now, was, client, commandLines(retry, 3))
 	}
 	return nil
 }
 
 // tcpCheck makes one request (ping) over TCP to e's baseurl, as e says: its
-// pins, and its key or certificate. It says how, as ping does.
+// pins, and the client certificate. It says how, as ping does.
 func tcpCheck(e ApiDetails, cc CliClientConf) (string, error) {
 	api, _, err := buildApiClient(e, cc, "", "")
 	if err != nil {
@@ -797,7 +844,7 @@ func renderAdd(o AddOptions, target string, existing []ApiDetails, entry ApiDeta
 		}
 	}
 	out, _, err := spliceApiserver(src, entry)
-	if errors.Is(err, errFlowApiservers) && entry.AuthMethod == "certificate" {
+	if errors.Is(err, errFlowApiservers) && len(entry.Pins) > 0 {
 		// Checked before the enrolment: an entry pasted now would hold a
 		// pin the daemon does not know.
 		return nil, fmt.Errorf("%s: %w; nothing was written.\nMake the list block style (or name its file with --file),\nthen run config add again", target, err)
@@ -941,7 +988,7 @@ func printAddResult(w io.Writer, r *AddResult, dryRun bool, cfg string) {
 	} else {
 		kind := "instance of " + r.Entry.Role
 		if r.Canonical {
-			kind = "canonical"
+			kind = "the " + r.Entry.Role + " entry"
 		}
 		switch {
 		case dryRun && r.Created:
@@ -959,9 +1006,12 @@ func printAddResult(w io.Writer, r *AddResult, dryRun bool, cfg string) {
 	printStepsNotes(w, r.Steps, r.Notes, dryRun)
 	switch {
 	case r.AlreadyKnown != "" && r.Update != "":
-		fmt.Fprintf(w, "\nconfig add writes new entries only. To change this one:\n\n   %s\n", r.Update)
+		fmt.Fprintf(w, "\nconfig add writes new entries only. To change this one:\n\n%s\n", commandLines(r.Update, 3))
 	case r.Update != "":
-		fmt.Fprintf(w, "\nThe daemon is not running. Once it is up, this gives the\nentry its address and your client certificate:\n\n   %s\n", r.Update)
+		if r.AccessMissing != "" {
+			fmt.Fprintf(w, "\nThe daemon's access file is missing, so it takes no remote\nclients. Create it (empty is fine):\n%s\n", commandLines("touch "+shellQuote(r.AccessMissing), 3))
+		}
+		fmt.Fprintf(w, "\nThe daemon is not running. Once it is up, this gives the\nentry its address and your client certificate:\n\n%s\n", commandLines(r.Update, 3))
 	case r.Running && !dryRun && r.AlreadyKnown == "":
 		// The CLI config the add read, not the --file it edited: --file
 		// only names where in that config the list lives.
@@ -991,16 +1041,30 @@ func printStepsNotes(w io.Writer, steps, notes []string, dryRun bool) {
 }
 
 // commandWord is the word that reaches entry e: the role of a built-in
-// role's canonical entry (auth for tdns-auth), else its name.
+// role's entry (whose name is that role, unless a downstream package
+// registered another), else its name.
 func commandWord(e ApiDetails) string {
-	if e.Role == "" {
-		for role, key := range builtinRoles() {
-			if key == e.Name {
-				return role
-			}
-		}
+	if role := roleEntryOf(e, builtinRoles()); role != "" {
+		return role
 	}
 	return e.Name
+}
+
+// entryRole is the daemon type of entry e: its role:, the role whose entry
+// it is, or for an entry with an old name, the role of the entry it must
+// become. "" when none says.
+func entryRole(e ApiDetails) string {
+	if e.Role != "" {
+		return e.Role
+	}
+	builtin := builtinRoles()
+	if role := roleEntryOf(e, builtin); role != "" {
+		return role
+	}
+	if n := renamedTo(e); n != "" {
+		return roleEntryOf(ApiDetails{Name: n}, builtin)
+	}
+	return ""
 }
 
 // --------------------------------------------------------------- config list
@@ -1016,7 +1080,7 @@ that reaches it, what kind of entry it is, its API address, the daemon config it
 refers to, and whether tdns-ncli can use it. An entry that is ignored says why.
 
 With --check each API is also pinged, and the exit status is non-zero if any
-of them does not answer, or could not be checked (rootca: tlsa).`,
+of them does not answer.`,
 		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 			cfg := cliConfigPath(cmd)
@@ -1071,10 +1135,6 @@ type ListRow struct {
 // instance was wired (root has instance trees on it by now).
 func BuildListRows(root *cobra.Command, entries []ApiDetails) []ListRow {
 	builtin := builtinRoles()
-	roleOfClient := map[string]string{}
-	for role, key := range builtin {
-		roleOfClient[key] = role
-	}
 	verdicts := checkInstanceEntries(commandsWithoutInstances(root), entries, builtin)
 
 	rows := make([]ListRow, 0, len(entries))
@@ -1084,17 +1144,24 @@ func BuildListRows(root *cobra.Command, entries []ApiDetails) []ListRow {
 		if r.BaseURL == "" {
 			r.BaseURL = "(local socket only)" // found through config-file:
 		}
-		if v.Canonical {
-			if role, ok := roleOfClient[e.Name]; ok {
-				r.Command, r.Kind, r.Status = role, "built-in "+role, "ok"
-				if r.ConfigFile == "" {
-					r.ConfigFile = defaultDaemonConfig(role) + " (default)"
-				}
-			} else {
-				r.Kind, r.Status = "other", "no command tree in this CLI"
+		switch {
+		case v.Rename != "":
+			r.Kind, r.Status = "old name", "ignored: rename it to "+v.Rename
+			if r.ConfigFile == "" {
+				r.ConfigFile = "-"
 			}
-		} else {
+		case v.RoleEntry != "":
+			r.Command, r.Kind, r.Status = v.RoleEntry, v.RoleEntry, "ok"
+			if r.ConfigFile == "" {
+				r.ConfigFile = defaultDaemonConfig(v.RoleEntry) + " (default)"
+			}
+		case v.Canonical:
+			r.Kind, r.Status = "other", "no command tree in this CLI"
+		default:
 			r.Kind = "instance of " + e.Role
+			if e.Role == "" || roleEntryOf(e, builtin) != "" {
+				r.Kind = "duplicate"
+			}
 			if v.Wire {
 				r.Command, r.Status = e.Name, "ok"
 			} else {
@@ -1115,8 +1182,8 @@ func BuildListRows(root *cobra.Command, entries []ApiDetails) []ListRow {
 func commandsWithoutInstances(root *cobra.Command) *cobra.Command {
 	s := &cobra.Command{Use: root.Name()}
 	for _, c := range root.Commands() {
-		if roleToClientKey[c.Name()] == c.Name() {
-			continue // an instance tree: WireInstanceTrees registers those as n -> n
+		if _, inst := wiredInstances[c.Name()]; inst {
+			continue // an instance tree
 		}
 		s.AddCommand(&cobra.Command{Use: c.Name(), Aliases: c.Aliases})
 	}
@@ -1185,14 +1252,9 @@ func pingEntry(e ApiDetails, cc CliClientConf, timeout time.Duration) string {
 	if err != nil {
 		return "FAIL: " + err.Error()
 	}
-	// Only when TLSA is what verifies the daemon: with pins (tlsauth: pin),
-	// a leftover rootca: tlsa is ignored and the entry can be checked.
-	if e.RootCA == "tlsa" && !(strings.EqualFold(e.TLSAuth, "pin") && len(e.Pins) > 0) {
-		return "not checked (rootca: tlsa)"
-	}
-	// What every other command would say when it uses this entry (no
-	// verification, a key in clear): the check says it too, after its
-	// verdict, so the leading ok/FAIL that sets the exit status stays first.
+	// What every other command would say when it uses this entry: the check
+	// says it too, after its verdict, so the leading ok/FAIL that sets the
+	// exit status stays first.
 	suffix := ""
 	if warn != "" {
 		suffix = " (warning: " + warn + ")"
@@ -1238,14 +1300,16 @@ func shortDuration(d time.Duration) string {
 	return fmt.Sprintf("%dm%ds", d/time.Minute, d%time.Minute/time.Second)
 }
 
-// duplicatePins reports entries that pin the same key. Two daemons with one
-// key cannot be told apart by their pins, so a command meant for one is
-// accepted by the other: the same hazard as a shared API key.
+// duplicatePins reports entries of different daemons that have the same
+// certificate pin. The CLI cannot tell such daemons apart, so a command
+// meant for one is accepted by the other. Where both entries name their
+// daemon config, the warning names the certificate and how to give the
+// second daemon its own (its default pair, which it writes at its start).
 func duplicatePins(entries []ApiDetails) []string {
-	by := map[string][]string{}
-	// Entries of one daemon (a key entry and a certificate entry with the
-	// same baseurl) pin its key as a matter of course; only distinct daemons
-	// sharing a key are worth a warning. daemons[pin] holds the daemons seen.
+	by := map[string][]ApiDetails{}
+	// Entries of one daemon (the same baseurl) have its pin as a matter of
+	// course; only distinct daemons sharing one are worth a warning.
+	// daemons[pin] holds the daemons seen.
 	daemons := map[string]map[string]bool{}
 	var order []string
 	for _, e := range entries {
@@ -1259,17 +1323,64 @@ func duplicatePins(entries []ApiDetails) []string {
 				continue
 			}
 			daemons[p][d] = true
-			by[p] = append(by[p], e.Name)
+			by[p] = append(by[p], e)
 		}
 	}
 	var out []string
 	for _, p := range order {
-		if names := by[p]; len(names) > 1 {
-			out = append(out, fmt.Sprintf("%s pin the same key (%s): each daemon should have a key of its own, or a command meant for one is accepted by the other",
-				strings.Join(names, " and "), p))
+		es := by[p]
+		if len(es) < 2 {
+			continue
 		}
+		names := make([]string, len(es))
+		for i, e := range es {
+			names[i] = e.Name
+		}
+		out = append(out, samePinWarning(names, es, p))
 	}
 	return out
+}
+
+// samePinWarning is duplicatePins' warning for the entries es, of names,
+// which all have pin. With the daemon configs of the first two, and the
+// second naming its certificate under apiserver:, it says which file and
+// what to change; else it names the pin.
+func samePinWarning(names []string, es []ApiDetails, pin string) string {
+	who := strings.Join(names, " and ")
+	generic := fmt.Sprintf("%s have the same certificate pin (%s): the CLI cannot tell them apart, so a command meant for one is accepted by the other. Each daemon should have a certificate of its own.",
+		who, pin)
+	if len(es) != 2 || es[0].ConfigFile == "" || es[1].ConfigFile == "" {
+		return warningText(generic)
+	}
+	cert, other := daemonCertFile(es[0].ConfigFile), daemonCertFile(es[1].ConfigFile)
+	if cert == "" || cert != other {
+		return warningText(generic)
+	}
+	second := es[1]
+	own, _ := tdns.ApiCertPaths(second.ConfigFile)
+	msg := fmt.Sprintf("%s use the same API certificate (%s): the CLI cannot tell them apart, so a command meant for one is accepted by the other. To give %s its own, remove certfile: and keyfile: under apiserver: in %s and restart it (at start it writes %s). Then run:",
+		who, cert, second.Name, second.ConfigFile, own)
+	return warningText(msg) + "\n" + commandLines(ncliForThisRun()+" config update "+shellQuote(second.Name)+" --repin", 3)
+}
+
+// warningText is msg wrapped in lines of at most 72, the first of them with
+// room for the "Warning: " its printer puts before it.
+func warningText(msg string) string {
+	const lead = "Warning: "
+	lines := wrapText(lead+msg, 72)
+	lines[0] = strings.TrimPrefix(lines[0], lead)
+	return strings.Join(lines, "\n")
+}
+
+// daemonCertFile is the API certificate the daemon config cfg names under
+// apiserver:, or "" when it names none (the default pair) or cannot be
+// read.
+func daemonCertFile(cfg string) string {
+	v, err := readDaemonViper(cfg)
+	if err != nil {
+		return ""
+	}
+	return v.GetString("apiserver.certfile")
 }
 
 // pinDaemon says which daemon an entry reaches, for duplicatePins: the

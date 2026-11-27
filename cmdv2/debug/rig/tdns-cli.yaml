@@ -1,5 +1,6 @@
+# The rig's daemon, over its local admin socket: run the rig as root. (There
+# are no API keys; over TCP the CLI would need a client certificate in the
+# daemon's access file.)
 apiservers:
-   - name:        tdns-auth
-     baseurl:     https://127.0.0.1:8400/api/v1
-     apikey:      ixfrtest-secret
-     authmethod:  X-API-Key
+   - name:        auth
+     baseurl:     unix:///var/run/tdns/ixfrtest.sock

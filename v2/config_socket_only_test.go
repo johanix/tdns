@@ -40,12 +40,11 @@ func TestSocketOnlyApiServerNeedsNoCertificate(t *testing.T) {
 		conf ApiServerConf
 		ok   bool
 	}{
-		{"socket and key, no certificate", ApiServerConf{Socket: sock, ApiKey: "k"}, true},
+		{"socket, no certificate", ApiServerConf{Socket: sock}, true},
 		// `addresses: []` decodes to a non-nil empty slice: still no listener.
-		{"socket and key, addresses: [], no certificate", ApiServerConf{Addresses: []string{}, Socket: sock, ApiKey: "k"}, true},
-		{"socket, no key", ApiServerConf{Socket: sock}, false},
-		{"addresses and key, no certificate", ApiServerConf{Addresses: []string{"127.0.0.1:8989"}, ApiKey: "k"}, false},
-		{"socket and key, a certificate that is not there", ApiServerConf{Socket: sock, ApiKey: "k", CertFile: "/nonexistent/cert.pem", KeyFile: "/nonexistent/key.pem"}, false},
+		{"socket, addresses: [], no certificate", ApiServerConf{Addresses: []string{}, Socket: sock}, true},
+		{"addresses, no certificate", ApiServerConf{Addresses: []string{"127.0.0.1:8989"}}, false},
+		{"socket, a certificate that is not there", ApiServerConf{Socket: sock, CertFile: "/nonexistent/cert.pem", KeyFile: "/nonexistent/key.pem"}, false},
 	} {
 		err := v.Struct(tc.conf)
 		if (err == nil) != tc.ok {
@@ -65,9 +64,9 @@ func TestSocketOnlyApiServerFromYAML(t *testing.T) {
 		name, doc string
 		ok        bool
 	}{
-		{"addresses: []", "apiserver:\n   addresses: []\n   apikey: k\n   socket: /var/run/tdns/tdns-auth.sock\n", true},
-		{"no addresses key", "apiserver:\n   apikey: k\n   socket: /var/run/tdns/tdns-auth.sock\n", true},
-		{"an address, no certificate", "apiserver:\n   addresses: [ 127.0.0.1:8989 ]\n   apikey: k\n   socket: /var/run/tdns/tdns-auth.sock\n", false},
+		{"addresses: []", "apiserver:\n   addresses: []\n   socket: /var/run/tdns/tdns-auth.sock\n", true},
+		{"no addresses key", "apiserver:\n   socket: /var/run/tdns/tdns-auth.sock\n", true},
+		{"an address, no certificate", "apiserver:\n   addresses: [ 127.0.0.1:8989 ]\n   socket: /var/run/tdns/tdns-auth.sock\n", false},
 	} {
 		var raw map[string]any
 		if err := yaml.Unmarshal([]byte(tc.doc), &raw); err != nil {

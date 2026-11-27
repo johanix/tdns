@@ -41,7 +41,7 @@ func TestKeystoreRefusalsPrintReadably(t *testing.T) {
 		json.NewEncoder(w).Encode(tdns.KeystoreResponse{Error: true, ErrorMsg: handlerMsg})
 	}))
 	defer srv.Close()
-	api := &tdns.ApiClient{Name: "tdns-auth", BaseUrl: srv.URL, AuthMethod: "none", Client: srv.Client()}
+	api := &tdns.ApiClient{Name: "tdns-auth", BaseUrl: srv.URL, Client: srv.Client()}
 
 	_, err := SendKeystoreCmd(api, tdns.KeystorePost{Command: "tsig-mgmt", SubCommand: "purge"})
 	got := keystoreErrorText(err)
@@ -102,7 +102,7 @@ func TestTruststoreRefusalPrintsReadably(t *testing.T) {
 		http.Error(w, needsAdmin, http.StatusForbidden)
 	}))
 	defer srv.Close()
-	api := &tdns.ApiClient{Name: "tdns-auth", BaseUrl: srv.URL, AuthMethod: "none", Client: srv.Client()}
+	api := &tdns.ApiClient{Name: "tdns-auth", BaseUrl: srv.URL, Client: srv.Client()}
 
 	_, err := SendTruststore(api, tdns.TruststorePost{Command: "child-sig0-mgmt", SubCommand: "list"})
 	got := keystoreErrorText(err)

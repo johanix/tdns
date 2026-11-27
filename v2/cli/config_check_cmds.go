@@ -22,7 +22,9 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -245,7 +247,7 @@ func instanceFlavour(role string) string {
 // apiDetailsForRole finds the apiservers entry a role targets.
 //
 // Two lookups, and both are needed. A built-in role resolves through
-// RegisterRole: "auth" to the entry named "tdns-auth". An extra instance is
+// RegisterRole: "auth" to the entry named "auth". An extra instance is
 // registered under its own name ("sectdns"), so the same lookup finds its
 // entry. Trying only the raw name silently ignored config-file: on every
 // canonical entry while honouring it on instances -- the same key working for
@@ -253,8 +255,8 @@ func instanceFlavour(role string) string {
 //
 // The mapping comes first, as in GetApiClient, which picks the client the
 // request is sent with: an entry that happens to be named "auth" must not
-// stand in for "tdns-auth", or acceptedApiKey reports a key the request did
-// not send. The raw name is the fallback for a role with no mapping.
+// stand in for another role's entry. The raw name is the fallback for a role
+// with no mapping.
 func apiDetailsForRole(role string) *ApiDetails {
 	if key := GetClientKeyFromParent(role); key != "" {
 		if ad := getApiDetailsByClientKey(key); ad != nil {
@@ -444,6 +446,7 @@ func runConfigCheck(role, explicitPath string, offline bool) {
 	checkListeners(&cfg, rep)
 	checkDo53QueriesRefused(&cfg, rep, effectiveRole(role) == "agent")
 	checkApiServer(&cfg, cfgPath, rep)
+	checkObsoleteApiKeys(v, rep)
 	checkDnssecPolicies(v, rep, online, role)
 	checkZones(&cfg, rep, online, role)
 	checkApiOwners(&cfg, rep)
@@ -675,14 +678,13 @@ func checkDoHPath(cfg *tdns.Config, rep *ccReport, g string, doh bool) {
 	}
 }
 
-// applyDaemonDefaults gives cfg the defaults the daemon's own decoder applies
-// before it decodes (ParseConfig) and a viper Unmarshal does not, so the
-// checks judge the config the daemon will run. apiserver.usetls defaults to
-// true when the apiserver block leaves it out.
+// applyDaemonDefaults gives cfg the defaults the daemon applies after it
+// decodes (ParseConfig) and a viper Unmarshal does not, so the checks judge
+// the config the daemon will run.
 func applyDaemonDefaults(v *viper.Viper, cfg *tdns.Config, cfgPath string) {
-	if v.IsSet("apiserver") && !v.IsSet("apiserver.usetls") {
-		cfg.ApiServer.UseTLS = true
-	}
+	// The access file: apiserver.access-file, or by default next to the
+	// config file.
+	cfg.ApiServer.AccessFile = tdns.ApiAccessFilePath(cfg.ApiServer.AccessFile, cfgPath)
 	// The socket the daemon serves: apiserver.socket, none, or by default one
 	// named after the config file, as ParseConfig fills it in.
 	cfg.ApiServer.Socket = tdns.ApiSocketPath(cfg.ApiServer.Socket, cfgPath)
@@ -721,22 +723,16 @@ func checkApiServer(cfg *tdns.Config, cfgPath string, rep *ccReport) {
 	if tcp && sockErr != nil {
 		rep.warn(g, "socket", fmt.Sprintf("%v: the daemon does not serve the local admin socket", sockErr), socketPathHint)
 	}
-	if cfg.ApiServer.ApiKey.Value() == "" {
-		rep.fail(g, "apikey", "apiserver.apikey is empty — the API router refuses to start without it",
-			"set a long random apiserver.apikey")
-	} else {
-		rep.pass(g, "apikey", "apiserver.apikey is set")
-	}
-	// certfile/keyfile are required with a TCP listener, even with
-	// usetls:false; the required-fields check validates the pair, but surface
-	// the plain existence here too. The socket alone needs neither.
+	// certfile/keyfile are required with a TCP listener; the
+	// required-fields check validates the pair, but surface the plain
+	// existence here too. The socket alone needs neither.
 	if !tcp && cfg.ApiServer.CertFile == "" && cfg.ApiServer.KeyFile == "" {
 		rep.info(g, "cert", "no apiserver.certfile/keyfile: none is needed without apiserver.addresses")
 	} else if cfg.ApiServer.CertPending {
 		cert, _ := tdns.ApiCertPaths(cfgPath)
 		rep.info(g, "cert", fmt.Sprintf("no apiserver.certfile/keyfile: the daemon writes a self-signed pair at %s (and .key) when it first starts", cert))
 	} else if cfg.ApiServer.CertFile == "" || cfg.ApiServer.KeyFile == "" {
-		rep.fail(g, "cert", "apiserver.certfile/keyfile must be set (required even when usetls:false)",
+		rep.fail(g, "cert", "apiserver.certfile and keyfile go together: set both, or neither for the default pair",
 			"generate a cert/key pair (see `tdns-cli auth config mwe`) and point certfile/keyfile at it")
 	} else {
 		checkFileExists(rep, g, "certfile", cfg.ApiServer.CertFile)
@@ -1224,17 +1220,6 @@ func checkApiServerCorrelation(role string, cfg *tdns.Config, rep *ccReport) {
 	} else if cfgPort != "" && cliPort == cfgPort {
 		rep.pass(g, "port", fmt.Sprintf("tdns-cli.yaml %q targets the right port (%s)", clientKey, cfgPort))
 	}
-
-	// Compare api key.
-	if cfg.ApiServer.ApiKey.Value() != "" && det.ApiKey != "" {
-		if cfg.ApiServer.ApiKey.Value() != det.ApiKey {
-			rep.fail(g, "apikey",
-				fmt.Sprintf("apiserver.apikey does not match the apikey in tdns-cli.yaml %q", clientKey),
-				"copy the server's apiserver.apikey into the matching tdns-cli.yaml apiservers entry")
-		} else {
-			rep.pass(g, "apikey", fmt.Sprintf("tdns-cli.yaml %q apikey matches apiserver.apikey", clientKey))
-		}
-	}
 }
 
 // ---------------------------------------------------------------------------
@@ -1257,7 +1242,7 @@ func correlateRunningConfig(role string, cfg *tdns.Config, cfgPath, daemonDBPath
 	} else if resp, err := SendConfigCommand(api, tdns.ConfigPost{Command: "status"}); err != nil {
 		rep.warn(g, "status", fmt.Sprintf("could not fetch running status: %v — status drift not correlated", err), "")
 	} else {
-		correlateStatus(cfg, resp, acceptedApiKey(role), rep, g)
+		correlateStatus(cfg, resp, rep, g)
 	}
 
 	// Running zones vs config zones.
@@ -1284,22 +1269,8 @@ func correlateRunningConfig(role string, cfg *tdns.Config, cfgPath, daemonDBPath
 	}
 }
 
-// acceptedApiKey is the API key this CLI sends to role's daemon, or "" when it
-// sends none (another auth method, or no entry).
-func acceptedApiKey(role string) string {
-	ad := apiDetailsForRole(role)
-	if ad == nil || ad.AuthMethod != "X-API-Key" {
-		return ""
-	}
-	return ad.ApiKey
-}
-
 // correlateStatus compares a config file with the running server's status.
-//
-// acceptedKey is the API key the status request was sent with. The reply came
-// back, so the running server accepted it: that is how the running key is
-// known, because the status reply no longer carries it (it is redacted).
-func correlateStatus(cfg *tdns.Config, resp tdns.ConfigResponse, acceptedKey string, rep *ccReport, g string) {
+func correlateStatus(cfg *tdns.Config, resp tdns.ConfigResponse, rep *ccReport, g string) {
 	if !sameStringSet(cfg.Listeners.Addresses, resp.Listeners.Addresses) {
 		rep.warn(g, "listeners-addresses",
 			fmt.Sprintf("config listeners.addresses %v differ from running %v", cfg.Listeners.Addresses, resp.Listeners.Addresses),
@@ -1318,18 +1289,6 @@ func correlateStatus(cfg *tdns.Config, resp tdns.ConfigResponse, acceptedKey str
 		rep.warn(g, "debug-do53-queries-refused",
 			fmt.Sprintf("config has debug-do53-queries-refused %s, the running server has it %s", onOff(on), onOff(resp.Do53QueriesRefused)),
 			"the option takes effect at the next restart")
-	}
-	warnApiKeyDrift(cfg, acceptedKey, rep, g)
-}
-
-// warnApiKeyDrift warns when the file's apiserver.apikey is not the key the
-// running server accepted (acceptedKey, the key a request that succeeded was
-// sent with). It says nothing when either is unknown.
-func warnApiKeyDrift(cfg *tdns.Config, acceptedKey string, rep *ccReport, g string) {
-	if acceptedKey != "" && cfg.ApiServer.ApiKey.Value() != "" && acceptedKey != cfg.ApiServer.ApiKey.Value() {
-		rep.warn(g, "apikey",
-			"apiserver.apikey in the file differs from the key the running server accepts",
-			"the running apikey changes only on restart")
 	}
 }
 
@@ -2065,9 +2024,7 @@ func checkApiOwners(cfg *tdns.Config, rep *ccReport) {
 
 // checkAppClients warns about apiserver.app-clients against the access file
 // it goes into force with (design 4.2, 4.9): a name the file has no client
-// for grants nothing, and while the API key is accepted, anyone with the key
-// is read-write on everything, so the application limits are only as good
-// as the key's secrecy.
+// for grants nothing.
 func checkAppClients(apps []string, af *tdns.AccessFile, rep *ccReport) {
 	const g = "API access file"
 	if len(apps) == 0 {
@@ -2083,45 +2040,50 @@ func checkAppClients(apps []string, af *tdns.AccessFile, rep *ccReport) {
 				"enrol the client (tdns-ncli <daemon> client add), or fix the name")
 		}
 	}
-	if af.KeyAuthOn() {
-		rep.warn(g, "keyauth", "apiserver.app-clients is set and the access file still accepts the API key (keyauth on): the key bypasses every application limit",
-			"once the applications use their certificates: tdns-ncli <daemon> client keyauth off")
-	}
 }
 
-// checkApiAccessFile runs the daemon's own validator over the access file, so
-// a file the daemon would not use is found before the reload rather than by it.
+// checkApiAccessFile runs the daemon's own loader over the access file, so a
+// file the daemon would not use is found before the reload rather than by
+// it. A missing file is no remote clients: said, with how to create it.
 func checkApiAccessFile(cfg *tdns.Config, rep *ccReport) {
 	const g = "API access file"
 	path := cfg.ApiServer.AccessFile
 	apps := cfg.ApiServer.AppClients
 	if path == "" {
-		if len(apps) > 0 {
-			rep.warn(g, "app-clients", "apiserver.app-clients is set, but there is no access file: without one no client has a certificate, so none is an application client",
-				"set apiserver.access-file and enrol the clients (tdns-ncli <daemon> client add), or drop app-clients")
-		}
 		return
 	}
 	af, err := tdns.LoadAccessFile(path)
-	if err != nil {
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		rep.info(g, "access-file", fmt.Sprintf("%s is missing, so the daemon takes no remote clients (the local socket works). To take them: touch %s", path, path))
+		if len(apps) > 0 {
+			rep.warn(g, "app-clients", "apiserver.app-clients is set, but there is no access file: no client has a certificate, so none is an application client",
+				"touch "+path+", then enrol the clients (tdns-ncli <daemon> client add), or drop app-clients")
+		}
+		return
+	case err != nil:
 		rep.fail(g, "access-file", err.Error(),
-			"fix the file (tdns-ncli <daemon> client ... writes only files that pass this check), then reload over the local socket")
+			"fix the file as it says (tdns-ncli <daemon> client ... writes only files that pass this check); the daemon loads it at the next client command or reload")
 		return
 	}
 	checkAppClients(apps, af, rep)
-	keyauth := "on"
-	if !af.KeyAuthOn() {
-		keyauth = "off"
+	rep.pass(g, "access-file", fmt.Sprintf("%s: %d client(s)", path, len(af.Clients)))
+	if af.KeyAuth != nil {
+		rep.warn(g, "keyauth", "keyauth: in the access file is obsolete (there is no API key) and ignored",
+			"delete the line; the daemon's next write of the file drops it")
 	}
-	rep.pass(g, "access-file", fmt.Sprintf("%s: %d client(s), keyauth %s", path, len(af.Clients), keyauth))
-	// The daemon refuses this (validateAccessSettings): an access file
-	// requires TLS on TCP; the local admin socket is the way in when TLS is
-	// broken. Said here with the fix, in this group.
-	if len(cfg.ApiServer.Addresses) > 0 && !cfg.ApiServer.UseTLS {
-		msg := "apiserver.usetls is false: with an access file the daemon refuses a plaintext TCP API (certificate clients could not authenticate"
-		if af.KeyAuthOn() {
-			msg += ", and the API key would cross the network in clear"
-		}
-		rep.fail(g, "usetls", msg+")", "set apiserver.usetls: true; when TLS is broken use the local admin socket, or drop apiserver.addresses for a socket-only daemon")
+}
+
+// checkObsoleteApiKeys warns about apiserver: keys of the API key era, which
+// the daemon ignores (and warns about at start).
+func checkObsoleteApiKeys(v *viper.Viper, rep *ccReport) {
+	const g = "API server"
+	if v.IsSet("apiserver.apikey") {
+		rep.warn(g, "apikey", "apiserver.apikey is no longer used: there are no API keys; clients authenticate with a certificate in the access file",
+			"delete the line")
+	}
+	if v.IsSet("apiserver.usetls") {
+		rep.warn(g, "usetls", "apiserver.usetls is no longer used: the TCP API is always TLS 1.3",
+			"delete the line")
 	}
 }

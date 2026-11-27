@@ -123,7 +123,7 @@ func TestRefusedCommandsPrintThroughThePrinter(t *testing.T) {
 			if !errors.As(err, &exit) || exit.ExitCode() != 1 {
 				t.Fatalf("exit: %v, want status 1; stdout %q, stderr %q", err, stdout.String(), stderr.String())
 			}
-			want := "Refused by tdns-auth (HTTP 403):\n  " + path + ": not available to application clients\n"
+			want := "Refused by auth (HTTP 403):\n  " + path + ": not available to application clients\n"
 			if stdout.String() != want {
 				t.Errorf("stdout\n%s\nwant\n%s", stdout.String(), want)
 			}
@@ -137,7 +137,7 @@ func TestRefusedCommandsPrintThroughThePrinter(t *testing.T) {
 // runRefusedPath runs one command the way tdns-cli runs it, against url.
 func runRefusedPath(path, url string) {
 	tdns.Globals.ApiClients = map[string]*tdns.ApiClient{
-		"tdns-auth": tdns.NewClient("tdns-auth", url+"/api/v1", "k", "X-API-Key", "insecure"),
+		"auth": tdns.NewClientWithOptions("auth", url+"/api/v1", tdns.ClientOptions{}),
 	}
 	switch path {
 	case "config reload":

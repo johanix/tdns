@@ -107,6 +107,9 @@ func isRootKeysCommand(cmd *cobra.Command) bool {
 }
 
 func init() {
+	// One "Error:" per error: cobra would print a command's error itself,
+	// and cobra.CheckErr in Execute prints it again.
+	rootCmd.SilenceErrors = true
 	// Config/API init moved to rootCmd.PersistentPreRun (skipped for root-level "keys")
 
 	// Catalog zone management lives under 'auth' — catalog zones are an

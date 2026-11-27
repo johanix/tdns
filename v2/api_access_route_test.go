@@ -36,17 +36,19 @@ func (e *authEnv) accessCall(t *testing.T, ap AccessPost) AccessResponse {
 	return resp
 }
 
-// The daemon writes its own access file: a new file 0600, a change keeps the
-// previous file as .prev and the file's mode, an add that is there already
-// writes nothing, a change the validator refuses writes nothing, a dry run
-// writes nothing. Each change is in force when /access answers, and every
-// answer says what is in force.
+// The daemon writes into the access file the operator created (touch): a
+// change keeps the previous file as .prev and the file's mode, an add that is
+// there already writes nothing, a change the validator refuses writes
+// nothing, a dry run writes nothing. Each change is in force when /access
+// answers, and every answer says what is in force.
 func TestAccessRouteWritesTheFile(t *testing.T) {
 	certs, pins := clientCerts(t, "anna", "bob", "carl")
-	e := newAuthEnv(t, "clients: []\n", certs)
+	e := newAuthEnv(t, "", certs) // touched: empty
 	e.conf.Internal.CfgFile = filepath.Join(filepath.Dir(e.sock), "tdns-auth.yaml")
 	path := e.conf.ApiServer.AccessFile
-	os.Remove(path)
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	read := func() string {
 		t.Helper()
 		b, _ := os.ReadFile(path)
@@ -76,16 +78,13 @@ func TestAccessRouteWritesTheFile(t *testing.T) {
 	add := AccessPost{Command: "add", Name: "anna", Pin: pins["anna"], Role: "read-write", Comment: "laptop"}
 	resp := e.accessCall(t, add)
 	ok(resp, "Added anna (read-write).")
-	if fi, err := os.Stat(path); err != nil || fi.Mode().Perm() != 0o600 {
-		t.Errorf("new file: %v %v, want mode 0600", fi, err)
+	if fi, err := os.Stat(path); err != nil || fi.Mode().Perm() != 0o644 {
+		t.Errorf("written file: %v %v, want the touched file's mode 0644 kept", fi, err)
 	}
-	if _, err := os.Stat(path + ".prev"); err == nil {
-		t.Error("a new file has a .prev")
-	}
-	if af, err := LoadAccessFile(path); err != nil || len(af.Clients) != 1 || !strings.Contains(read(), "Written by the daemon") {
+	if af, err := LoadAccessFile(path); err != nil || len(af.Clients) != 1 || !strings.Contains(read(), "Written by the daemon") || strings.Contains(read(), "keyauth") {
 		t.Errorf("written file: %v\n%s", err, read())
 	}
-	if len(resp.Clients) != 1 || resp.Clients[0].Comment != "laptop" || !resp.KeyAuth {
+	if len(resp.Clients) != 1 || resp.Clients[0].Comment != "laptop" {
 		t.Errorf("in force after the add: %+v", resp)
 	}
 	// config status answers read-only callers too: no comments there.
@@ -108,7 +107,7 @@ func TestAccessRouteWritesTheFile(t *testing.T) {
 	refused(AccessPost{Command: "add", Name: "bob", Pin: pins["anna"], Role: "read-only"}, "also \"anna\"'s")
 	refused(AccessPost{Command: "set-role", Name: "anna", Role: "admin"}, "only on the local socket")
 	refused(AccessPost{Command: "disable", Name: "nobody"}, "no client \"nobody\"")
-	refused(AccessPost{Command: "keyauth", KeyAuth: "maybe"}, "on or off")
+	refused(AccessPost{Command: "keyauth"}, "keyauth is gone")
 	refused(AccessPost{Command: "drop"}, "unknown /access command")
 
 	// A change keeps the previous file as .prev, and the file's mode.
@@ -128,16 +127,11 @@ func TestAccessRouteWritesTheFile(t *testing.T) {
 	if !running().byPin[pins["bob"]].Disabled || running().byPin[pins["bob"]].Role != "read-write" {
 		t.Errorf("bob in force: %+v, want read-write and disabled", running().byPin[pins["bob"]])
 	}
-	if st, _ := e.call(t, "/api/v1/ping", "bob", false, `{}`); st != http.StatusForbidden {
+	if st, _ := e.call(t, "/api/v1/ping", "bob", `{}`); st != http.StatusForbidden {
 		t.Errorf("disabled bob over TCP: %d, want 403", st)
 	}
 	ok(e.accessCall(t, AccessPost{Command: "disable", Name: "bob"}), "already disabled")
 	ok(e.accessCall(t, AccessPost{Command: "enable", Name: "bob"}), "bob: enabled")
-	resp = e.accessCall(t, AccessPost{Command: "keyauth", KeyAuth: "off"})
-	ok(resp, "keyauth off")
-	if resp.KeyAuth || running().KeyAuth {
-		t.Errorf("keyauth off: answer %v, running %v; want off", resp.KeyAuth, running().KeyAuth)
-	}
 
 	// A dry run renders, and writes and loads nothing.
 	before = read()
@@ -150,12 +144,12 @@ func TestAccessRouteWritesTheFile(t *testing.T) {
 	}
 
 	resp = e.accessCall(t, AccessPost{Command: "list"})
-	if resp.Error || resp.Msg != "In force: 2 client(s), keyauth off." || len(resp.Clients) != 2 {
+	if resp.Error || resp.Msg != "In force: 2 client(s)." || len(resp.Clients) != 2 {
 		t.Errorf("list: %+v", resp)
 	}
 
 	// /access is admin, list included: refused on TCP to a read-write client.
-	if st, body := e.call(t, "/api/v1/access", "anna", false, `{"Command":"list"}`); st != http.StatusForbidden || !strings.Contains(body, "needs admin") {
+	if st, body := e.call(t, "/api/v1/access", "anna", `{"Command":"list"}`); st != http.StatusForbidden || !strings.Contains(body, "needs admin") {
 		t.Errorf("/access over TCP as anna (read-write): %d %q, want 403 needing admin", st, body)
 	}
 }
@@ -181,17 +175,17 @@ func TestAccessNoChangeLoadsTheFile(t *testing.T) {
 	}
 }
 
-// keyauth on with the access file missing writes it, although the policy
-// it holds is the empty one: a named file that is not there cannot load.
-func TestAccessKeyauthOnCreatesMissingFile(t *testing.T) {
-	e := newAuthEnv(t, "clients: []\n", nil)
+// An access file with the obsolete keyauth: line loads, and the daemon's
+// next write drops the line, even when nothing else changes.
+func TestAccessDropsTheObsoleteKeyauthLine(t *testing.T) {
+	_, pins := clientCerts(t, "anna")
+	e := newAuthEnv(t, "keyauth: true\nclients:\n  - {name: anna, pin: "+pins["anna"]+", role: read-write}\n", nil)
 	path := e.conf.ApiServer.AccessFile
-	os.Remove(path)
-	if resp := e.accessCall(t, AccessPost{Command: "keyauth", KeyAuth: "on"}); resp.Error {
-		t.Fatalf("keyauth on, file missing: %+v, want it written", resp)
+	if resp := e.accessCall(t, AccessPost{Command: "enable", Name: "anna"}); resp.Error || !strings.Contains(resp.Msg, "already enabled") {
+		t.Fatalf("enable anna: %+v", resp)
 	}
-	if fi, err := os.Stat(path); err != nil || fi.Mode().Perm() != 0o600 {
-		t.Errorf("the access file: %v %v, want it there, 0600", fi, err)
+	if b, _ := os.ReadFile(path); strings.Contains(string(b), "keyauth") {
+		t.Errorf("the file after a write:\n%s\nwant the keyauth: line gone", b)
 	}
 }
 
@@ -246,7 +240,7 @@ func TestAccessFileKeepsItsGroup(t *testing.T) {
 	if alt < 0 || os.Chown(path, -1, alt) != nil {
 		t.Skip("the test user has no second group to give a file")
 	}
-	if err := writeAccessFile(path, []byte("clients: []\n"), []byte("keyauth: false\nclients: []\n")); err != nil {
+	if err := writeAccessFile(path, []byte("clients: []\n"), []byte("clients: []\n# changed\n")); err != nil {
 		t.Fatal(err)
 	}
 	for _, p := range []string{path, path + ".prev"} {
@@ -257,74 +251,67 @@ func TestAccessFileKeepsItsGroup(t *testing.T) {
 	}
 }
 
-// With no access-file: every write is refused, with the line to add, what it
-// changes and the reload, in lines of at most 72. list answers with the key
-// in force, and the same advice.
+// With no access file every write is refused: the daemon never creates it.
+// The refusal names the file and gives the touch line, in lines of at most
+// 72 apart from the path's, and list says the same. Once the file is
+// touched, the next call loads it and the add is done, with no reload.
 func TestAccessRouteWithoutAccessFile(t *testing.T) {
 	_, pins := clientCerts(t, "anna")
 	e := newAuthEnv(t, "-", nil)
-	e.conf.Internal.CfgFile = "/etc/tdns/tdns-auth.yaml"
-	resp := e.accessCall(t, AccessPost{Command: "add", Name: "anna", Pin: pins["anna"], Role: "read-write"})
-	if !resp.Error {
-		t.Fatalf("add without an access file: %+v, want a refusal", resp)
+	path := e.conf.ApiServer.AccessFile
+	add := AccessPost{Command: "add", Name: "anna", Pin: pins["anna"], Role: "read-write"}
+	resp := e.accessCall(t, add)
+	if !resp.Error || !resp.Missing || resp.File != path {
+		t.Fatalf("add without an access file: %+v, want a refusal naming the missing file", resp)
 	}
-	for _, want := range []string{"No access file", "access-file: /etc/tdns/tdns-auth-access.yaml",
-		"admin to read-write", "TLS is required", "TLS 1.3", "config reload", "--daemon-config /etc/tdns/tdns-auth.yaml", "again"} {
+	for _, want := range []string{"access file " + path + " is missing", "takes no remote clients", "\n   touch " + path} {
 		if !strings.Contains(resp.ErrorMsg, want) {
 			t.Errorf("refusal lacks %q:\n%s", want, resp.ErrorMsg)
 		}
 	}
 	for _, l := range strings.Split(resp.ErrorMsg, "\n") {
-		if len(l) > 72 {
+		if len(l) > 72 && !strings.Contains(l, path) {
 			t.Errorf("line over 72 columns: %q", l)
 		}
 	}
+	if _, err := os.Stat(path); err == nil {
+		t.Fatal("the daemon created the access file")
+	}
 	resp = e.accessCall(t, AccessPost{Command: "list"})
-	if resp.Error || !strings.HasPrefix(resp.Msg, "No access file: the API key is admin") || !resp.KeyAuth || resp.File != "" || resp.Configured != "" {
+	if resp.Error || !resp.Missing || !strings.Contains(resp.Msg, "No access file, so no remote clients") || !strings.Contains(resp.Msg, "touch "+path) {
 		t.Errorf("list without an access file: %+v", resp)
+	}
+
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if resp = e.accessCall(t, add); resp.Error || resp.Missing || len(resp.Clients) != 1 {
+		t.Errorf("add once the file is touched: %+v, want it written and in force", resp)
 	}
 }
 
-// The first enrolment: the config names an access file that is not there
-// yet, which a reload kept without loading it. list names that file, and add
-// creates it and puts it in force.
-func TestAccessConfiguredFileNotThereYet(t *testing.T) {
+// An access file that group or others can write is refused before a write,
+// with the chmod that fixes it; nothing is written.
+func TestAccessRouteRefusesAWritableFile(t *testing.T) {
 	_, pins := clientCerts(t, "anna")
 	e := newAuthEnv(t, "clients: []\n", nil)
 	path := e.conf.ApiServer.AccessFile
-	os.Remove(path)
-	e.conf.Internal.ApiAccess.p.Store(&accessState{}) // as after that reload
-	resp := e.accessCall(t, AccessPost{Command: "list"})
-	if resp.Error || resp.File != "" || resp.Configured != path ||
-		!strings.Contains(resp.Msg, path+"\nwhich does not exist yet: client add creates it.") {
-		t.Fatalf("list, the configured file not there: %+v", resp)
+	os.Chmod(path, 0o666)
+	resp := e.accessCall(t, AccessPost{Command: "add", Name: "anna", Pin: pins["anna"], Role: "read-write"})
+	if !resp.Error || !strings.Contains(resp.ErrorMsg, "chmod go-w "+path) {
+		t.Errorf("add to a world-writable file: %+v, want refused with the chmod line", resp)
 	}
-	for _, l := range strings.Split(resp.Msg, "\n") {
-		if len(l) > 72 {
-			t.Errorf("line over 72 columns: %q", l)
-		}
-	}
-	resp = e.accessCall(t, AccessPost{Command: "add", Name: "anna", Pin: pins["anna"], Role: "read-write"})
-	if resp.Error || resp.File != path || resp.Configured != path || len(resp.Clients) != 1 {
-		t.Fatalf("add, the configured file not there: %+v, want it written and in force", resp)
-	}
-	// There but not loaded: a file that does not parse.
-	os.WriteFile(path, []byte("clients: [\n"), 0o600)
-	e.conf.Internal.ApiAccess.p.Store(&accessState{})
-	if resp = e.accessCall(t, AccessPost{Command: "list"}); !strings.Contains(resp.Msg, "but it is not loaded: config reload says why.") {
-		t.Errorf("list, the configured file not loaded: %q", resp.Msg)
+	if b, _ := os.ReadFile(path); string(b) != "clients: []\n" {
+		t.Errorf("the file was written:\n%s", b)
 	}
 }
 
 // The pins /access reports are of the certificate the TCP API serves, which
-// APIdispatcher loads once for its listeners; none without a TLS listener.
+// APIdispatcher loads once for its listeners; none without a listener.
 func TestAccessReportsTheServedPins(t *testing.T) {
 	resetApiDispatch(t)
 	addr := freeTCPAddr(t)
-	conf := plaintextApiConf(addr)
-	conf.ApiServer.UseTLS = true
-	var pin string
-	conf.ApiServer.CertFile, conf.ApiServer.KeyFile, pin = testApiCertFiles(t)
+	conf, pin := tlsApiConf(t, addr)
 	startDispatcher(t, conf)
 
 	c, err := tls.Dial("tcp", addr, &tls.Config{InsecureSkipVerify: true})
@@ -340,41 +327,12 @@ func TestAccessReportsTheServedPins(t *testing.T) {
 		t.Errorf("ServerPins %v, want [%s]", got, pin)
 	}
 
-	// A plaintext dispatcher serves no certificate.
-	addr2 := freeTCPAddr(t)
-	startDispatcher(t, plaintextApiConf(addr2))
+	// No listener, no certificate served.
+	resetApiDispatch(t)
+	apiTCPServers.Lock()
+	apiTCPServers.srvs = nil
+	apiTCPServers.Unlock()
 	if got := conf.runAccessCommand(AccessPost{Command: "list"}).ServerPins; len(got) != 0 {
-		t.Errorf("plaintext TCP API: ServerPins %v, want none", got)
-	}
-}
-
-// The file of the policy in force deleted (the config still names it): an
-// add or keyauth is refused, not a new file that holds only that change and
-// drops the clients in force and keyauth off. Nothing is written; the policy
-// stays.
-func TestAccessRefusesToReplaceThePolicyInForce(t *testing.T) {
-	_, pins := clientCerts(t, "anna", "bob")
-	e := newAuthEnv(t, "keyauth: false\nclients:\n  - {name: bob, pin: "+pins["bob"]+", role: read-write}\n", nil)
-	path := e.conf.ApiServer.AccessFile
-	os.Remove(path)
-	for _, ap := range []AccessPost{
-		{Command: "add", Name: "anna", Pin: pins["anna"], Role: "read-write"},
-		{Command: "keyauth", KeyAuth: "on"},
-	} {
-		resp := e.accessCall(t, ap)
-		if !resp.Error || !strings.Contains(resp.ErrorMsg, "is in force (1 client(s), keyauth off)") || !strings.Contains(resp.ErrorMsg, "put that file back") {
-			t.Errorf("%s with the file in force gone: %+v, want a refusal", ap.Command, resp)
-		}
-		for _, l := range strings.Split(resp.ErrorMsg, "\n") {
-			if len(l) > 72 && !strings.Contains(l, path) {
-				t.Errorf("line over 72 columns: %q", l)
-			}
-		}
-		if _, err := os.Stat(path); err == nil {
-			t.Fatalf("%s wrote %s", ap.Command, path)
-		}
-		if st := e.conf.apiAccessStatus(); st == nil || len(st.Clients) != 1 || st.KeyAuth {
-			t.Errorf("%s: policy in force %+v, want bob and keyauth off", ap.Command, st)
-		}
+		t.Errorf("no TCP listener: ServerPins %v, want none", got)
 	}
 }

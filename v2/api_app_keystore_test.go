@@ -852,29 +852,27 @@ func TestAppKeystoreOverTheNetwork(t *testing.T) {
 	list := `{"Command":"tsig-mgmt","SubCommand":"list"}`
 	for _, tc := range []struct {
 		name, path, cert string
-		key              bool
 		body             string
 		want             int
 		wantBody         string
 	}{
-		{"an application lists its keys", "/api/v1/keystore", "provisioner", false, list, 200, `"mine."`},
-		{"list-algorithms is open", "/api/v1/keystore", "provisioner", false, `{"Command":"list-algorithms"}`, 200, "Algorithms"},
-		{"purge needs admin", "/api/v1/keystore", "provisioner", false, `{"Command":"tsig-mgmt","SubCommand":"purge","Force":true}`, 403, "/api/v1/keystore tsig-mgmt purge needs admin"},
-		{"clear needs admin", "/api/v1/keystore", "provisioner", false, `{"Command":"dnssec-mgmt","SubCommand":"clear","Zone":"own.example."}`, 403, "dnssec-mgmt clear needs admin"},
-		{"an unreadable subcommand", "/api/v1/keystore", "provisioner", false, `{"Command":"tsig-mgmt","SubCommand":7}`, 403, "a subcommand that cannot be read"},
-		{"a read-only application", "/api/v1/keystore", "reader", false, list, 403, "tsig-mgmt list needs read-write; reader is read-only"},
-		{"an operator's certificate", "/api/v1/keystore", "ops", false, list, 403, "tsig-mgmt list needs admin"},
-		{"the key", "/api/v1/keystore", "", true, list, 403, "needs admin"},
-		{"the truststore", "/api/v1/truststore", "provisioner", false, `{"Command":"list-dnskey"}`, 403, "needs admin"},
+		{"an application lists its keys", "/api/v1/keystore", "provisioner", list, 200, `"mine."`},
+		{"list-algorithms is open", "/api/v1/keystore", "provisioner", `{"Command":"list-algorithms"}`, 200, "Algorithms"},
+		{"purge needs admin", "/api/v1/keystore", "provisioner", `{"Command":"tsig-mgmt","SubCommand":"purge","Force":true}`, 403, "/api/v1/keystore tsig-mgmt purge needs admin"},
+		{"clear needs admin", "/api/v1/keystore", "provisioner", `{"Command":"dnssec-mgmt","SubCommand":"clear","Zone":"own.example."}`, 403, "dnssec-mgmt clear needs admin"},
+		{"an unreadable subcommand", "/api/v1/keystore", "provisioner", `{"Command":"tsig-mgmt","SubCommand":7}`, 403, "a subcommand that cannot be read"},
+		{"a read-only application", "/api/v1/keystore", "reader", list, 403, "tsig-mgmt list needs read-write; reader is read-only"},
+		{"an operator's certificate", "/api/v1/keystore", "ops", list, 403, "tsig-mgmt list needs admin"},
+		{"the truststore", "/api/v1/truststore", "provisioner", `{"Command":"list-dnskey"}`, 403, "needs admin"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			st, body := e.call(t, tc.path, tc.cert, tc.key, tc.body)
+			st, body := e.call(t, tc.path, tc.cert, tc.body)
 			if st != tc.want || !strings.Contains(body, tc.wantBody) {
 				t.Errorf("%d %q, want %d containing %q", st, body, tc.want, tc.wantBody)
 			}
 		})
 	}
-	_, body := e.call(t, "/api/v1/keystore", "provisioner", false, list)
+	_, body := e.call(t, "/api/v1/keystore", "provisioner", list)
 	if strings.Contains(body, `"theirs."`) || strings.Contains(body, `"ops."`) {
 		t.Errorf("the application's list shows others' keys: %s", body)
 	}

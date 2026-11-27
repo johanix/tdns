@@ -20,8 +20,7 @@ func testPin(name string) string {
 }
 
 // config check warns about apiserver.app-clients: a name the access file
-// has no client for, the API key still accepted (it bypasses every
-// application limit), and app-clients without an access file.
+// has no client for, and app-clients without an access file.
 func TestConfigCheckWarnsAboutAppClients(t *testing.T) {
 	dir := t.TempDir()
 	for _, tc := range []struct {
@@ -30,21 +29,20 @@ func TestConfigCheckWarnsAboutAppClients(t *testing.T) {
 		warn         []string // checks that warn
 	}{
 		{"none set", "clients:\n  - {name: anna, pin: " + testPin("anna") + ", role: read-write}\n", nil, nil},
-		{"enrolled, key off", "keyauth: false\nclients:\n  - {name: anna, pin: " + testPin("anna") + ", role: read-write}\n", []string{"anna"}, nil},
-		{"key on", "clients:\n  - {name: anna, pin: " + testPin("anna") + ", role: read-write}\n", []string{"anna"}, []string{"keyauth"}},
-		{"not enrolled", "keyauth: false\nclients:\n  - {name: anna, pin: " + testPin("anna") + ", role: read-write}\n", []string{"anna", "ghost"}, []string{"app-clients"}},
+		{"enrolled", "clients:\n  - {name: anna, pin: " + testPin("anna") + ", role: read-write}\n", []string{"anna"}, nil},
+		{"not enrolled", "clients:\n  - {name: anna, pin: " + testPin("anna") + ", role: read-write}\n", []string{"anna", "ghost"}, []string{"app-clients"}},
 		{"no access file", "", []string{"anna"}, []string{"app-clients"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := &tdns.Config{}
 			cfg.ApiServer.AppClients = tc.apps
+			p := filepath.Join(dir, strings.ReplaceAll(tc.name, " ", "-")+".yaml")
 			if tc.access != "" {
-				p := filepath.Join(dir, strings.ReplaceAll(tc.name, " ", "-")+".yaml")
 				if err := os.WriteFile(p, []byte(tc.access), 0o600); err != nil {
 					t.Fatal(err)
 				}
-				cfg.ApiServer.AccessFile = p
 			}
+			cfg.ApiServer.AccessFile = p // always on: missing when there is none
 			rep := newCCReport()
 			checkApiAccessFile(cfg, rep)
 			var warned []string
@@ -114,7 +112,7 @@ func TestARefusalPrintsOnceAndReadably(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
-	api := &tdns.ApiClient{Name: "tdns-auth", BaseUrl: srv.URL, AuthMethod: "none", Client: srv.Client()}
+	api := &tdns.ApiClient{Name: "tdns-auth", BaseUrl: srv.URL, Client: srv.Client()}
 
 	// The sender and the printer run inside one capture, so that the
 	// exact-output check also catches a sender that prints the error
@@ -181,7 +179,7 @@ func TestCatalogCommandTriesEachAddress(t *testing.T) {
 	gone := httptest.NewServer(http.NotFoundHandler())
 	dead := strings.TrimPrefix(gone.URL, "http://")
 	gone.Close()
-	api := &tdns.ApiClient{Name: "tdns-auth", BaseUrl: "http://" + dead, AuthMethod: "none", Client: &http.Client{},
+	api := &tdns.ApiClient{Name: "tdns-auth", BaseUrl: "http://" + dead, Client: &http.Client{},
 		Addresses: []string{dead, strings.TrimPrefix(live.URL, "http://")}}
 	resp, err := SendCatalogCommand(api, tdns.CatalogPost{Command: "zone-list", CatalogZone: "cat.example."})
 	if err != nil || resp == nil || resp.Msg != "listed" {

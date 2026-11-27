@@ -32,7 +32,7 @@ func TestPlainTextRefusalIsAnError(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
-	api := &ApiClient{BaseUrl: srv.URL, AuthMethod: "none", Client: srv.Client()}
+	api := &ApiClient{BaseUrl: srv.URL, Client: srv.Client()}
 
 	status, _, err := api.Post("/refused", []byte("{}"))
 	if err == nil || status != http.StatusForbidden {
@@ -59,7 +59,7 @@ func TestStopDaemonReportsARefusal(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, adminOnly, http.StatusForbidden)
 	}))
-	refusing := &ApiClient{BaseUrl: srv.URL, AuthMethod: "none", Client: srv.Client()}
+	refusing := &ApiClient{BaseUrl: srv.URL, Client: srv.Client()}
 	if err := refusing.StopDaemon(); err == nil {
 		t.Error("StopDaemon on a refusal returned nil")
 	}
@@ -68,14 +68,14 @@ func TestStopDaemonReportsARefusal(t *testing.T) {
 		json.NewEncoder(w).Encode(CommandResponse{Status: "stopping"})
 	}))
 	defer stopping.Close()
-	ok := &ApiClient{BaseUrl: stopping.URL, AuthMethod: "none", Client: stopping.Client()}
+	ok := &ApiClient{BaseUrl: stopping.URL, Client: stopping.Client()}
 	if err := ok.StopDaemon(); err != nil {
 		t.Errorf("StopDaemon on an acknowledged stop: %v", err)
 	}
 
 	gone := srv.URL
 	srv.Close()
-	notRunning := &ApiClient{BaseUrl: gone, AuthMethod: "none", Client: &http.Client{}}
+	notRunning := &ApiClient{BaseUrl: gone, Client: &http.Client{}}
 	if err := notRunning.StopDaemon(); err != nil {
 		t.Errorf("StopDaemon with no daemon running: %v (want nil: stop is a no-op)", err)
 	}
@@ -83,7 +83,7 @@ func TestStopDaemonReportsARefusal(t *testing.T) {
 	// The local socket of a daemon that is not running: no socket file.
 	// (StartDaemon asks the same daemonNotRunning before it starts one, and
 	// while it waits for the new one to answer; see TestDaemonNotRunning.)
-	noSocket := NewClient("local", "unix://"+filepath.Join(shortTempDir(t), "absent.sock"), "", "none", "")
+	noSocket := NewClientWithOptions("local", "unix://"+filepath.Join(shortTempDir(t), "absent.sock"), ClientOptions{})
 	if err := noSocket.StopDaemon(); err != nil {
 		t.Errorf("StopDaemon with no socket file: %v (want nil: stop is a no-op)", err)
 	}
@@ -95,7 +95,7 @@ func TestStopDaemonReportsARefusal(t *testing.T) {
 func TestDaemonNotRunning(t *testing.T) {
 	dir := shortTempDir(t)
 	status := func(baseurl string) error {
-		_, _, err := NewClient("local", baseurl, "", "none", "").UpdateDaemon(CommandPost{Command: "status"}, false)
+		_, _, err := NewClientWithOptions("local", baseurl, ClientOptions{}).UpdateDaemon(CommandPost{Command: "status"}, false)
 		return err
 	}
 
@@ -106,7 +106,7 @@ func TestDaemonNotRunning(t *testing.T) {
 	gone := httptest.NewServer(http.NotFoundHandler())
 	url := gone.URL
 	gone.Close()
-	notRunning := &ApiClient{BaseUrl: url, AuthMethod: "none", Client: &http.Client{}}
+	notRunning := &ApiClient{BaseUrl: url, Client: &http.Client{}}
 	if _, _, err := notRunning.UpdateDaemon(CommandPost{Command: "status"}, false); !daemonNotRunning(err) {
 		t.Errorf("refused TCP: %v, want not running", err)
 	}
@@ -149,7 +149,7 @@ func TestPostTriesEachAddress(t *testing.T) {
 	dead := strings.TrimPrefix(gone.URL, "http://")
 	gone.Close()
 
-	api := &ApiClient{BaseUrl: "http://" + dead + "/api", Addresses: []string{dead, liveAddr}, AuthMethod: "none", Client: &http.Client{}}
+	api := &ApiClient{BaseUrl: "http://" + dead + "/api", Addresses: []string{dead, liveAddr}, Client: &http.Client{}}
 	for _, tc := range []struct {
 		method string
 		call   func() (int, []byte, error)
@@ -168,7 +168,7 @@ func TestPostTriesEachAddress(t *testing.T) {
 
 	// A refusal is an answer: the address after it is not asked.
 	hits.Store(0)
-	refusing := &ApiClient{BaseUrl: live.URL + "/api", Addresses: []string{liveAddr, liveAddr}, AuthMethod: "none", Client: &http.Client{}}
+	refusing := &ApiClient{BaseUrl: live.URL + "/api", Addresses: []string{liveAddr, liveAddr}, Client: &http.Client{}}
 	status, _, err := refusing.Post("/refused", []byte("{}"))
 	var ref *ApiRefusal
 	if status != http.StatusForbidden || !errors.As(err, &ref) || hits.Load() != 1 {
@@ -176,13 +176,13 @@ func TestPostTriesEachAddress(t *testing.T) {
 	}
 
 	// No address answers: the error says so, and which were tried.
-	allDead := &ApiClient{BaseUrl: "http://" + dead + "/api", Addresses: []string{dead, dead}, AuthMethod: "none", Client: &http.Client{}}
+	allDead := &ApiClient{BaseUrl: "http://" + dead + "/api", Addresses: []string{dead, dead}, Client: &http.Client{}}
 	if _, _, err := allDead.Post("/catalog", []byte("{}")); err == nil || !daemonNotRunning(err) || !strings.Contains(err.Error(), "tried "+dead+", "+dead) {
 		t.Errorf("every address dead: %v, want a refused connection naming both", err)
 	}
 
 	// No Addresses: BaseUrl.
-	plain := &ApiClient{BaseUrl: live.URL + "/api", AuthMethod: "none", Client: &http.Client{}}
+	plain := &ApiClient{BaseUrl: live.URL + "/api", Client: &http.Client{}}
 	if status, _, err := plain.Post("/catalog", []byte("{}")); err != nil || status != http.StatusOK {
 		t.Errorf("no Addresses: status %d, err %v", status, err)
 	}
