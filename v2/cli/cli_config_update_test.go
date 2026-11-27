@@ -311,8 +311,28 @@ func TestUpdateRepin(t *testing.T) {
 		t.Errorf("current pins, no config-file: entries %+v", got)
 	}
 
-	body := d.writeCli(t, old)
+	// A stale address (another port): --repin takes the daemon's own.
+	d.writeCli(t, strings.Replace(old, "baseurl: @U@", "baseurl: https://127.0.0.1:1/api/v1", 1))
+	res, err = d.update(t, withRepin)
+	if err != nil || !res.Wrote || res.Entry.BaseURL != d.url {
+		t.Errorf("stale address: %+v, %v", res.Entry, err)
+	}
+
+	// --repin enrols nothing: a daemon that does not know the client
+	// certificate has still shown its pins, and the entry is written.
+	d.writeCli(t, old)
 	d.refusePing = true
+	res, err = d.update(t, withRepin)
+	if err != nil || !res.Wrote || !strings.Contains(strings.Join(res.Steps, "\n"), "does not\nknow your client certificate") {
+		t.Errorf("a daemon that does not know the client: %+v, %v", res, err)
+	}
+	d.refusePing = false
+
+	// A certificate without the pins the daemon gives: nothing written.
+	body := d.writeCli(t, old)
+	d.mu.Lock()
+	d.srvPin = "d3Jvbmc="
+	d.mu.Unlock()
 	if _, err := d.update(t, withRepin); err == nil || !strings.Contains(err.Error(), "with the daemon's\npins failed") {
 		t.Errorf("TCP check fails: %v", err)
 	}

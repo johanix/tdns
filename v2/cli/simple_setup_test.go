@@ -436,10 +436,16 @@ func TestTCPRefusalNamesTheAddress(t *testing.T) {
 	cfg := filepath.Join(dir, "tdns-auth.yaml")
 	writeFile(t, cfg, daemonYAML("TDNS-AUTH", "127.0.0.1:8989", "   socket: "+filepath.Join(dir, "a.sock")+"\n"))
 
-	_, _, err := buildApiClient(ApiDetails{Name: "auth", Role: "auth", ConfigFile: cfg, BaseURL: "https://192.0.2.1:8989/api/v1"}, CliClientConf{}, "", "")
+	_, _, err := buildApiClient(ApiDetails{Name: "auth", Role: "auth", ConfigFile: cfg, BaseURL: "https://127.0.0.1:8075/api/v1"}, CliClientConf{}, "", "")
 	var r clientRefusal
-	if !errors.As(err, &r) || !strings.Contains(r.why, "192.0.2.1:8989 is not one") || r.fix != "tdns-ncli config update auth --cert" {
+	if !errors.As(err, &r) || !strings.Contains(r.why, "127.0.0.1:8075 is not one") || r.fix != "tdns-ncli config update auth --repin" {
 		t.Errorf("refusal = %+v (%v)", r, err)
+	}
+	// Another host's address: that config may not be the daemon's there,
+	// so the refusal is the ordinary one.
+	_, _, err = buildApiClient(ApiDetails{Name: "auth", Role: "auth", ConfigFile: cfg, BaseURL: "https://192.0.2.1:8989/api/v1"}, CliClientConf{}, "", "")
+	if !errors.As(err, &r) || strings.Contains(r.why, "is not one") {
+		t.Errorf("another host: %+v (%v)", r, err)
 	}
 	_, _, err = buildApiClient(ApiDetails{Name: "auth", Role: "auth", ConfigFile: cfg, BaseURL: "https://127.0.0.1:8989/api/v1"}, CliClientConf{}, "", "")
 	if !errors.As(err, &r) || strings.Contains(r.why, "is not one") {
@@ -477,7 +483,7 @@ func TestStaleLocalAddressUsesTheSocket(t *testing.T) {
 	t.Cleanup(func() { srv.Close() })
 
 	got, note := usableDaemonSocket(ApiDetails{Name: "imr", Role: "imr", ConfigFile: cfg, BaseURL: "https://127.0.0.1:8075/api/v1"})
-	if got != sock || !strings.Contains(note, "127.0.0.1:8075 is not one") || !strings.Contains(note, "tdns-ncli config update imr --cert") {
+	if got != sock || !strings.Contains(note, "127.0.0.1:8075 is not one") || !strings.Contains(note, "tdns-ncli config update imr --repin") {
 		t.Errorf("stale local address: %q, note %q", got, note)
 	}
 	if got, note := usableDaemonSocket(ApiDetails{Name: "imr", Role: "imr", ConfigFile: cfg, BaseURL: "https://127.0.0.1:8084/api/v1"}); got != sock || note != "" {

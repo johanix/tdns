@@ -8,13 +8,16 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"reflect"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -227,15 +230,22 @@ func UpdateEntry(o UpdateOptions) (*UpdateResult, error) {
 	if e.ConfigFile == "" {
 		up.ConfigFile = info.ConfigFile
 	}
-	if o.Cert && !https {
+	// The daemon's own address when the entry has none, or one its daemon
+	// config does not list (a stale port or host): --cert and --repin both
+	// take it. An address the daemon lists (it may list several) stays.
+	if !https || !listsAddress(info, e.BaseURL) {
 		up.BaseURL = tcpURL
 	}
 	if o.Repin && samePins(e.Pins, up.Pins) && up.Name == e.Name {
-		if up.ConfigFile == e.ConfigFile {
+		switch {
+		case up.ConfigFile == e.ConfigFile && up.BaseURL == e.BaseURL:
 			res.Entry, res.Current = e, true
 			return res, nil
+		case up.BaseURL != e.BaseURL:
+			res.Notes = append(res.Notes, "the pins were current; the address is the change")
+		default:
+			res.Notes = append(res.Notes, "the pins were current; config-file: is the change")
 		}
-		res.Notes = append(res.Notes, "the pins were current; config-file: is the change")
 	}
 	// Refused before anything is enrolled: an entry the editor cannot change.
 	out, err := renderUpdate(o.CliConfig, target, existing, i, up)
@@ -261,7 +271,9 @@ func UpdateEntry(o UpdateOptions) (*UpdateResult, error) {
 			return nil, err
 		}
 	default:
-		ok, err := tcpCheck(up, cc)
+		// --repin enrols nothing: it checks the pins, and a daemon that does
+		// not know the client certificate has still shown them.
+		ok, err := pinCheck(up, cc)
 		if err != nil {
 			return nil, fmt.Errorf("a request over TCP to %s with the daemon's\npins failed: %v\nNothing was written", up.BaseURL, err)
 		}
@@ -525,4 +537,41 @@ func printUpdateResult(w io.Writer, r *UpdateResult, o UpdateOptions) {
 		}
 	}
 	printStepsNotes(w, steps, r.Notes, o.DryRun)
+}
+
+// listsAddress says whether the daemon config of info lists the TCP address
+// of baseurl among its apiserver.addresses.
+func listsAddress(info *DaemonApi, baseurl string) bool {
+	hp := hostPort(baseurl)
+	for _, a := range info.Addresses {
+		if u, err := apiBaseURL(a); err == nil && hostPort(u) == hp {
+			return true
+		}
+	}
+	return false
+}
+
+// pinCheck is --repin's request over TCP to e with its new pins. What it
+// checks is the handshake: a daemon that then refuses the client
+// certificate (403: not one it knows, or none) has still shown a
+// certificate with these pins. It enrols nothing.
+func pinCheck(e ApiDetails, cc CliClientConf) (string, error) {
+	o := tdns.ClientOptions{Pins: e.Pins}
+	if cert, err := loadClientCert(cc); err == nil {
+		o.ClientCert = cert
+	}
+	api := tdns.NewClientWithOptions(e.Name, e.BaseURL, o)
+	api.Client.Timeout = 10 * time.Second
+	status, buf, err := api.RequestNG(http.MethodPost, "/ping", tdns.PingPost{Msg: "config update --repin", Pings: 1}, false)
+	switch {
+	case err == nil:
+		var pr tdns.PingResponse
+		if json.Unmarshal(buf, &pr) == nil {
+			return "TCP check: ok (" + pingHow(api, pr) + ")", nil
+		}
+		return "TCP check: ok, the daemon's certificate has these pins", nil
+	case status == http.StatusForbidden:
+		return "TCP check: the daemon's certificate has these pins; it does not\nknow your client certificate (config update " + e.Name + " --cert enrols it)", nil
+	}
+	return "", err
 }

@@ -50,7 +50,7 @@ func runPing(role string, cmd *cobra.Command, args []string) {
 				if hp, addrs := addressNotListed(*e); hp != "" {
 					lead := fmt.Sprintf("Error: nothing answers at %s, the address of the entry %q; %s has the daemon on %s.",
 						hp, e.Name, e.ConfigFile, strings.Join(addrs, ", "))
-					fmt.Fprintf(os.Stderr, "%s\nFix:\n%s\n", strings.Join(wrapText(lead, 72), "\n"), commandLines(updateFix(*e, "--cert"), 3))
+					fmt.Fprintf(os.Stderr, "%s\nFix:\n%s\n", strings.Join(wrapText(lead, 72), "\n"), commandLines(updateFix(*e, "--repin"), 3))
 					os.Exit(1)
 				}
 			}

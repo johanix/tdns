@@ -354,33 +354,32 @@ func socketCandidate(e ApiDetails) bool {
 	return !ForceTCP && e.ConfigFile != "" && !isUnixURL(e.BaseURL)
 }
 
-// tcpRefusal is r, unless e's TCP address is what keeps it off this host's
-// admin socket (usableDaemonSocket uses the socket only for an address its
-// daemon config lists): then that is why, and config update --cert is the
-// fix. It takes the daemon's own address and pins, and makes the client
-// certificate if there is none.
+// tcpRefusal is r, unless e's TCP address is on this host but not one its
+// daemon config lists (a stale address) and the socket could not be used:
+// then that is why, and config update --repin is the fix. It takes the
+// daemon's own address and pins, and enrols nothing.
 func tcpRefusal(e ApiDetails, r clientRefusal) clientRefusal {
 	hp, addrs := addressNotListed(e)
 	if hp == "" {
 		return r
 	}
 	return clientRefusal{entry: e.Name,
-		why: fmt.Sprintf("its address %s is not one %s listens on (%s), so this host's admin socket is not used for it",
+		why: fmt.Sprintf("its address %s is not one %s listens on (%s)",
 			hp, e.ConfigFile, strings.Join(addrs, ", ")),
-		fix: updateFix(e, "--cert")}
+		fix: updateFix(e, "--repin")}
 }
 
 // addressNotListed is e's TCP address and the addresses its daemon config
-// lists, when that config (on this host) does not list e's: the entry then
-// stays off this host's admin socket and dials an address the daemon may
-// not be on. "" and nil otherwise.
+// lists, when e's is on this host but not one that config lists: a stale
+// address of this host's daemon. "" and nil otherwise, an address on
+// another host among them (that config may not be the daemon's there).
 func addressNotListed(e ApiDetails) (string, []string) {
 	if !socketCandidate(e) || e.BaseURL == "" {
 		return "", nil
 	}
 	sock, addrs := daemonSocket(e.ConfigFile)
 	hp := hostPort(e.BaseURL)
-	if sock == "" || len(addrs) == 0 || hp == "" || slices.Contains(addrs, hp) {
+	if sock == "" || len(addrs) == 0 || hp == "" || slices.Contains(addrs, hp) || !onThisHost(hp) {
 		return "", nil
 	}
 	return hp, addrs
@@ -495,7 +494,7 @@ func usableDaemonSocket(e ApiDetails) (sock, note string) {
 		}
 		lead := fmt.Sprintf("%s: its address %s is not one %s lists (%s), so the local admin socket is used. This fixes the entry:",
 			e.Name, hp, e.ConfigFile, strings.Join(addrs, ", "))
-		stale = strings.Join(wrapText(lead, 63), "\n") + "\n" + commandLines(updateFix(e, "--cert"), 3)
+		stale = strings.Join(wrapText(lead, 63), "\n") + "\n" + commandLines(updateFix(e, "--repin"), 3)
 	}
 	c, err := net.DialTimeout("unix", sock, time.Second)
 	if err != nil {

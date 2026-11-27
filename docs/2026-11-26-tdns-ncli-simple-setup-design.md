@@ -306,7 +306,14 @@ changed in the PR.
   starts and restarts without `config-file:`, on the role's default config.
 - **`--cert` works on an entry that has pins already**: it enrols the client
   certificate again ("already there") and takes the pins. It is the one
-  command that makes an entry work; `--repin` takes new pins only.
+  command that makes an entry work.
+- **`--repin` enrols nothing.** It takes the daemon's pins and checks them
+  with one request over TCP: a daemon that then refuses the client
+  certificate (403) has still shown them, and the step says `--cert` would
+  enrol it.
+- **`--cert` and `--repin` take the daemon's own address** when the entry
+  has none, or one its daemon config does not list (a stale port or host).
+  An address the daemon lists stays.
 - **An entry with an old name is never used.** A command that needs it
   refuses with the rename; `config add` refuses to add the role's entry while
   one is there.
@@ -320,10 +327,11 @@ changed in the PR.
   is a stale address of this host's daemon. The entry then uses the local
   admin socket (the daemon there must still say it runs the entry's
   `config-file:`), with a warning that gives `config update <entry>
-  --cert`. An address on another host keeps the entry off this host's
-  socket, as before. When its TCP path then refuses (no pins, no client
-  certificate), or `ping` finds nothing at the address, the error says the
-  address is not the daemon's, with the same fix.
+  --repin`. An address on another host keeps the entry off this host's
+  socket, as before. When the socket cannot be used either and the TCP
+  path refuses (no pins, no client certificate), or `ping` finds nothing
+  at the address, the error says the address is not the daemon's, with the
+  same fix.
 - **An entry without `config-file:`** gets a fix command with the daemon
   config it most likely is: the role's default for a role's entry
   (`/etc/tdns/tdns-auth.yaml`), else `/etc/tdns/tdns-<name>.yaml`.
